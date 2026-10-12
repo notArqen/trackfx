@@ -307,23 +307,104 @@ void main(){
   }
   // photo: re-render the current frame off-screen at photo resolution (max or current settings),
   // read it back and hand the pixels to the photo module. gameplay settings are restored right after
-  PT.requestPhoto = () => { PT.photoReq = true; };
-  function takePhoto(three, renderer, scene, camera) {
+  // opts.preview: a half-res averaged render for the photo-mode preview (PT.onPreview), not saved
+  PT.requestPhoto = (opts) => { PT.photoReq = opts || true; };
+  function takePhoto(three, renderer, scene, camera, opts) {
     const c = PT.cfg, size = renderer.getDrawingBufferSize(new T.Vector2());
     const long = { "1080p": 1920, "1440p": 2560, "4k": 3840, "5k": 5120 }[c.photoRes] || 3840;
-    const k = long / Math.max(size.x, size.y), w = Math.round(size.x * k), h = Math.round(size.y * k);
+    const k = opts?.preview ? 0.5 : long / Math.max(size.x, size.y), w = Math.round(size.x * k), h = Math.round(size.y * k);
     const saved = {};
-    if (c.photoMax) {
+    if (c.photoMax && !opts?.preview) {
       const max = Object.assign({}, PT.QUALITY?.ultra, { ao: true, godRays: true, bloom: true, reflections: true, occlusion: true, ssrSteps: 32, bloomMips: 6 });
       for (const [key, v] of Object.entries(max)) { saved[key] = c[key]; c[key] = v; }
     }
     const target = new T.WebGLRenderTarget(w, h, { type: 1009 /* UnsignedByte */, depthBuffer: false });
+    // the photo is many renders averaged: each gets a sub-pixel camera shift (anti-aliasing) and a nudged time
+    // (every jittered effect draws a different noise pattern, so reflection/AO/beam grain averages out). the
+    // same samples give forza-style motion blur: spread the car (and in "track" mode the camera with it)
+    // along the car's velocity over the shutter time
+    let N = Math.max(1, Math.min(64, c.photoSamples | 0 || 1));
+    const one = new T.WebGLRenderTarget(w, h, { type: 1016, depthBuffer: false });
+    const acc = new T.WebGLRenderTarget(w, h, { type: 1016, depthBuffer: false });
+    mats.acc ??= Object.assign(material(`uniform sampler2D tSrc; uniform float uW; void main(){ gl_FragColor = vec4(texture2D(tSrc, vUv).rgb * uW, 1.0); }   /* additive = SrcAlpha,One: weight only once */`,
+      { tSrc: { value: null }, uW: { value: 1 } }), { transparent: true, blending: 2 /* additive */ });
+    mats.copy ??= material(`uniform sampler2D tSrc; void main(){ gl_FragColor = vec4(texture2D(tSrc, vUv).rgb, 1.0); }`, { tSrc: { value: null } });
+    const car = PT.playerCar, mode = c.photoBlur || "off";
+    let root = car?.body; while (root && root.parent && root.parent !== scene) root = root.parent;
+    const vel = (PT.photoVel && PT.photoVel.lengthSq() > 0.01 ? PT.photoVel : car?.vel)?.clone() ?? new T.Vector3();
+    const blur = mode !== "off" && root && vel.lengthSq() > 0.25;
+    if (blur) {
+      // enough samples that the smear has no visible steps: ~1 sample per 4 px of on-screen travel (max 96)
+      const half = vel.clone().multiplyScalar((c.photoShutter ?? 1 / 30) / 2);
+      // measured at the car body's real position (the root group's own position is not where the car is)
+      // the corner of the car that sweeps furthest on screen (a car driving away barely moves at its centre while
+      // its tail, near the lens, sweeps a long way)
+      const at = car.pos ?? root.position;
+      let px = 0;
+      for (let q = 0; q < 8; q++) {
+        const pt = at.clone();
+        if (car.fwd) pt.addScaledVector(car.fwd, q & 1 ? 2.2 : -2.2).addScaledVector(car.right, q & 2 ? 1.1 : -1.1).addScaledVector(car.up, q & 4 ? 0.7 : -0.3);
+        const p0 = pt.clone().sub(half).project(camera), p1 = pt.clone().add(half).project(camera);
+        if (p0.z < 1 && p1.z < 1) px = Math.max(px, Math.hypot((p1.x - p0.x) * w / 2, (p1.y - p0.y) * h / 2));
+      }
+      N = Math.max(N, Math.min(96, Math.ceil(px / 4)));
+      PT.lastPhotoSamples = { N, px: Math.round(px) };
+    }
+    const t0 = PT.state.time, rootPos = root?.position.clone(), camPos = camera.position.clone();
+    // ghosts blur along their own velocity (captured when photo mode paused the game, else live)
+    const topOf = (o) => { while (o && o.parent && o.parent !== scene) o = o.parent; return o; };
+    const ghosts = mode === "off" ? [] : ((PT.photoMode?.on && PT.photoGhosts) || (PT.ghostPoses || []).map((g) => ({ body: g.body, vel: g.vel })))
+      .map((g) => ({ root: topOf(g.body), vel: g.vel?.clone() })).filter((g) => g.root && g.root !== root && g.vel && g.vel.lengthSq() > 0.25)
+      .map((g) => Object.assign(g, { pos: g.root.position.clone() }));
+    // depth of field: every sample looks through a different point of a lens disc, with the image shifted so the
+    // focus plane (the car) stays put; everything nearer or further lands in different places and blurs
+    const dofR = c.photoAperture ?? 0;   // lens radius in metres (0 = off)
+    const camQ = camera.quaternion.clone(), camR = new T.Vector3(1, 0, 0).applyQuaternion(camQ), camU = new T.Vector3(0, 1, 0).applyQuaternion(camQ);
+    const camF = new T.Vector3(0, 0, -1).applyQuaternion(camQ);
+    const focus = c.photoFocus === "manual" ? Math.max(0.5, c.photoFocusDist ?? 8) : car?.pos ? Math.max(1, car.pos.clone().sub(camPos).dot(camF)) : 8;
+    const pxPerRad = (h / 2) / Math.tan(((camera.fov || 60) * Math.PI) / 360);
+    if (dofR > 0) N = Math.max(N, dofR > 0.05 ? 64 : 40);
+    if (opts?.preview) N = Math.min(N, 40);   // previews trade a little smoothness for speed
+    PT.lastPhotoSamples = Object.assign(PT.lastPhotoSamples || {}, { N, focus: +focus.toFixed(1) });
+    const halton = (i, b) => { let f = 1, r = 0; while (i > 0) { f /= b; r += f * (i % b); i = Math.floor(i / b); } return r; };
+    const cc = renderer.getClearColor(new T.Color()), ca = renderer.getClearAlpha(), ac = renderer.autoClear;
     try {
-      frame(three, renderer, scene, camera, { w, h, target });
+      renderer.setRenderTarget(acc); renderer.setClearColor(0x000000, 0); renderer.clear();
+      PT.photoT0 = t0;
+      for (let i = 0; i < N; i++) {
+        PT.state.time = t0 + i * 0.0011;
+        let ox = N > 1 ? halton(i + 1, 2) - 0.5 : 0, oy = N > 1 ? halton(i + 1, 3) - 0.5 : 0;
+        camera.position.copy(camPos);
+        if (blur) {
+          const sft = (N > 1 ? i / (N - 1) - 0.5 : 0) * (c.photoShutter ?? 1 / 30);
+          root.position.copy(rootPos).addScaledVector(vel, sft); root.updateMatrixWorld(true);
+          for (const g of ghosts) { g.root.position.copy(g.pos).addScaledVector(g.vel, sft); g.root.updateMatrixWorld(true); }
+          if (mode === "track") camera.position.addScaledVector(vel, sft);
+        }
+        if (dofR > 0) {
+          // vogel disc: evenly spread lens positions
+          const rr = dofR * Math.sqrt((i + 0.5) / N), th = i * 2.39996323;
+          const lx = rr * Math.cos(th), ly = rr * Math.sin(th);
+          camera.position.addScaledVector(camR, lx).addScaledVector(camU, ly);
+          ox -= (lx / focus) * pxPerRad; oy += (ly / focus) * pxPerRad;
+        }
+        if (N > 1) camera.setViewOffset(w, h, ox, oy, w, h);
+        camera.updateProjectionMatrix(); camera.updateMatrixWorld(true);
+        frame(three, renderer, scene, camera, { w, h, target: one });
+        mats.acc.uniforms.tSrc.value = one.texture; mats.acc.uniforms.uW.value = 1 / N;
+        renderer.autoClear = false; pass(renderer, mats.acc, acc); renderer.autoClear = ac;
+      }
+      mats.copy.uniforms.tSrc.value = acc.texture; pass(renderer, mats.copy, target);
       const buf = new Uint8Array(w * h * 4);
       renderer.readRenderTargetPixels(target, 0, 0, w, h, buf);
-      PT.onPhoto?.(buf, w, h);
+      (opts?.preview ? PT.onPreview : PT.onPhoto)?.(buf, w, h);
     } finally {
+      PT.state.time = t0; PT.photoT0 = undefined; renderer.autoClear = ac; renderer.setClearColor(cc, ca);
+      if (N > 1) camera.clearViewOffset();
+      camera.position.copy(camPos); camera.updateProjectionMatrix(); camera.updateMatrixWorld(true);
+      if (root && rootPos) { root.position.copy(rootPos); root.updateMatrixWorld(true); }
+      for (const g of ghosts) { g.root.position.copy(g.pos); g.root.updateMatrixWorld(true); }
+      one.dispose(); acc.dispose();
       Object.assign(c, saved);
       target.dispose();
       for (const [n, t] of Object.entries(rts)) if (n.startsWith("photo:")) { t.depthTexture?.dispose(); t.dispose(); delete rts[n]; }
@@ -350,7 +431,7 @@ void main(){
         PT.gameCamera = camera;
         const cam = (T && PT.cameraHook?.(camera, T)) || camera;   // cinematic replay camera, if active
         frame(three, renderer, scene, cam);
-        if (PT.photoReq) { PT.photoReq = false; takePhoto(three, renderer, scene, cam); }
+        if (PT.photoReq) { const o = PT.photoReq; PT.photoReq = false; takePhoto(three, renderer, scene, cam, o === true ? null : o); }
       }
       catch (e) {
         // never take the game down with us: fall back to vanilla rendering for the session
@@ -1034,7 +1115,9 @@ uniform float uIA[3], uTailA[3];
 uniform int uN;
 uniform vec3 uCol, uAlbGain;
 uniform float uRange, uLift, uDip, uR0;
+uniform vec2 uTexel;
 vec3 uFwd, uUp, uRight;   // the car being shaded (set per loop iteration)
+vec3 posAt(vec2 uv, float z){ vec4 p = uInvVP * vec4(uv * 2.0 - 1.0, z * 2.0 - 1.0, 1.0); return p.xyz / p.w; }
 float beam(vec3 P, vec3 N, vec3 L){
   vec3 v = P - L; float dist = length(v); vec3 dir = v / dist;
   float f = dot(dir, uFwd);
@@ -1049,7 +1132,7 @@ float beam(vec3 P, vec3 N, vec3 L){
   float pattern = below * (spill * mix(0.22 * reach, 0.5, cut) + hot * cut * 1.3);
   float fall = pow(1.0 + dist / uR0, -1.6) * (1.0 - smoothstep(uRange * 0.6, uRange, dist));
   float ndl = dot(N, -dir);
-  float lit = smoothstep(0.0, 0.03, ndl) * mix(max(ndl, 0.0), 1.0, uLift);  // grazing road still reads
+  float lit = smoothstep(-0.02, 0.06, ndl) * mix(max(ndl, 0.0), 1.0, uLift);  // grazing road still reads (soft: no flicker at the cutoff)
   return pattern * fall * lit;
 }
 // tail/brake light: a short, wide red pool behind the car
@@ -1065,9 +1148,25 @@ void main(){
   vec4 s4 = texture2D(tColor, vUv); vec3 src = s4.rgb;   // alpha = sky visibility, passed through
   float z = texture2D(tDepth, vUv).r;
   if (z >= 0.99999 || uN == 0) { gl_FragColor = s4; return; }
-  vec4 p = uInvVP * vec4(vUv * 2.0 - 1.0, z * 2.0 - 1.0, 1.0);
-  vec3 P = p.xyz / p.w;
-  vec3 N = normalize(cross(dFdx(P), dFdy(P)));
+  vec3 P = posAt(vUv, z);
+  // normal from neighbouring depths, taking the SHORTER difference on each axis. dFdx/dFdy of a reconstructed
+  // position is noisy on big flat floors seen from afar (depth precision), and at the beam's grazing angle that
+  // noise flipped pixels lit/unlit in vertical stripes
+  vec2 ex = vec2(uTexel.x, 0.0), ey = vec2(0.0, uTexel.y);
+  vec3 pr = posAt(vUv + ex, texture2D(tDepth, vUv + ex).r) - P, pl = P - posAt(vUv - ex, texture2D(tDepth, vUv - ex).r);
+  vec3 pu = posAt(vUv + ey, texture2D(tDepth, vUv + ey).r) - P, pd = P - posAt(vUv - ey, texture2D(tDepth, vUv - ey).r);
+  vec3 dx = dot(pr, pr) < dot(pl, pl) ? pr : pl, dy = dot(pu, pu) < dot(pd, pd) ? pu : pd;
+  vec3 N = normalize(cross(dx, dy));
+  // curved track is built from flat facets: a per-pixel normal lights each facet differently (vertical bands at
+  // grazing angles). chords across ~8 px each way see the curve as a smooth arc. used only where both chord ends
+  // stay near this surface's plane, so walls/kerbs/edges keep the sharp 1 px normal
+  vec2 wx = ex * 8.0, wy = ey * 8.0;
+  vec3 Rw = posAt(vUv + wx, texture2D(tDepth, vUv + wx).r), Lw = posAt(vUv - wx, texture2D(tDepth, vUv - wx).r);
+  vec3 Uw = posAt(vUv + wy, texture2D(tDepth, vUv + wy).r), Dw = posAt(vUv - wy, texture2D(tDepth, vUv - wy).r);
+  float okx = step(abs(dot(Rw - P, N)), 0.2 * length(Rw - P)) * step(abs(dot(Lw - P, N)), 0.2 * length(Lw - P));
+  float oky = step(abs(dot(Uw - P, N)), 0.2 * length(Uw - P)) * step(abs(dot(Dw - P, N)), 0.2 * length(Dw - P));
+  vec3 Nw = normalize(cross(okx > 0.5 ? Rw - Lw : dx, oky > 0.5 ? Uw - Dw : dy));
+  if (dot(Nw, N) > 0.0) N = Nw; else N = -Nw;
   if (dot(N, uCamPos - P) < 0.0) N = -N;
   vec3 alb = clamp(src * uAlbGain, 0.0, 1.0);
   vec3 add = vec3(0.0);
@@ -1093,7 +1192,7 @@ void main(){
     keys.add(e.code);
     if (/^(Arrow|Key[WASD]$)/.test(e.code)) lastInput = performance.now();
     // manual headlight toggle on E or ?/ ; the first press takes over from auto
-    if (!e.repeat && (e.code === "KeyE" || e.code === "Slash") && player) {   // no car = editor/menus (E rotates the editor view)
+    if (!e.repeat && (e.code === "KeyE" || e.code === "Slash") && player && !PT.photoMode?.on) {   // photo mode: E = camera up   // no car = editor/menus (E rotates the editor view)
       const lit = player && cars.get(player)?.on > 0.02;
       cfg.hlManual = cfg.hlAuto ? !lit : !cfg.hlManual;
       cfg.hlAuto = false; PT.save?.(); PT.onReset?.();
@@ -1244,7 +1343,10 @@ void main(){
       L[0] = p.x; L[1] = p.y; L[2] = p.z;
     }
     c.F = a.fwd.toArray(); c.U = a.up.toArray(); c.R = a.right.toArray();
-    c.pose = { at: performance.now(), body, mw: body.matrixWorld.clone(), pos: a.ctr.clone(), fwd: a.fwd.clone(), up: a.up.clone(), right: a.right.clone(), isPlayer };
+    // velocity for every car (photo motion blur moves ghosts along it too); dt-smoothed like the player's
+    const pdt = Math.max(ctx.state.dt, 1e-3), pv = c.lastCtr && !ctx.photo ? a.ctr.clone().sub(c.lastCtr).divideScalar(pdt) : null;
+    if (pv && pv.length() < 400) c.vel = c.vel ? c.vel.lerp(pv, 0.3) : pv; else if (!c.vel) c.vel = new ctx.T.Vector3();
+    c.pose = { at: performance.now(), body, mw: body.matrixWorld.clone(), pos: a.ctr.clone(), fwd: a.fwd.clone(), up: a.up.clone(), right: a.right.clone(), vel: c.vel.clone(), isPlayer };
 
     // brake detection. player: the brake key while rolling forward. replays/ghosts: sustained
     // deceleration from a smoothed speed (physics ticks and render frames don't line up, so raw
@@ -1313,7 +1415,7 @@ void main(){
       if (!mat) {
         const v3 = () => ({ value: [0, 1, 2].map(() => new T.Vector3()) });
         mat = ctx.material(PT.SH.HEADLIGHTS, {
-          tColor: { value: null }, tDepth: { value: null }, uInvVP: { value: new T.Matrix4() }, uCamPos: { value: new T.Vector3() },
+          tColor: { value: null }, tDepth: { value: null }, uInvVP: { value: new T.Matrix4() }, uCamPos: { value: new T.Vector3() }, uTexel: { value: new T.Vector2() },
           uL0: v3(), uL1: v3(), uFwdA: v3(), uUpA: v3(), uRightA: v3(), uT0: v3(), uT1: v3(),
           uIA: { value: [0, 0, 0] }, uTailA: { value: [0, 0, 0] }, uN: { value: 0 },
           uCol: { value: new T.Vector3(1.0, 0.95, 0.86) }, uAlbGain: { value: new T.Vector3(1, 1, 1) },
@@ -1323,6 +1425,7 @@ void main(){
       const u = mat.uniforms, cam = ctx.camera;
       u.tColor.value = ctx.color; u.tDepth.value = ctx.depth;
       u.uInvVP.value.copy(cam.matrixWorld).multiply(cam.projectionMatrixInverse);
+      u.uTexel.value.set(1 / ctx.w, 1 / ctx.h);
       u.uCamPos.value.setFromMatrixPosition(cam.matrixWorld);
       const n = Math.min(3, lit.length);
       for (let i = 0; i < 3; i++) {
@@ -1437,6 +1540,11 @@ void main(){
   };
   PT.WEATHER_NAMES = Object.keys(STATES);
   const W = (PT.weather = Object.assign({}, STATES.clear, { flash: 0, boltAz: 0, boltSeed: 0, wetNow: 0 }));
+  // photo mode (L): a strike right now, its bolt placed inside the camera's view (az matches atan(V.z, V.x))
+  PT.strikeLightning = (camFwd) => {
+    W.flash = 0.75; W.boltSeed = Math.random() * 100; W.boltAge = 0;   // a full 1.0 flash blew photos out
+    W.boltAz = (camFwd ? Math.atan2(camFwd.z, camFwd.x) : Math.random() * 6.283) + (Math.random() - 0.5) * 0.5;
+  };
   let nextBolt = 5;
 
   function step(dt) {
@@ -1450,7 +1558,7 @@ void main(){
     W.wetNow += (wt - W.wetNow) * (1 - Math.exp(-dt / (wt > W.wetNow ? 10 : 40)));
     // lightning: random strikes, a double flicker, then decay
     W.flash *= Math.exp(-dt / 0.12);
-    if (cfg.lightning && W.bolt > 0.5) {
+    if (cfg.lightning && W.bolt > 0.5 && !PT.photoMode?.on) {   // photo mode: lightning only on demand (L)
       nextBolt -= dt;
       if (nextBolt <= 0) {
         W.flash = 1; W.boltAz = Math.random() * Math.PI * 2; W.boltSeed = Math.random() * 100; W.boltAge = 0;
@@ -1877,7 +1985,7 @@ void main(){ vec3 c = texture2D(tColor, vUv).rgb; if (uLinearIn < 0.5) c = srgb2
       if (!rainOn) return;
       mesh.geometry.setDrawRange(0, Math.floor(Math.min(1, rain) * MAX) * 6);
       const u = mesh.material.uniforms;
-      u.uTime.value = ctx.state.time;
+      u.uTime.value = PT.photoT0 ?? ctx.state.time;   // photo samples nudge time for noise only: drops stay put
       u.uWind.value.set(cfg.wind * 9, 0, cfg.wind * 3);
       // only part of the camera's own motion goes into the streaks: full-strength read as warp speed
       u.uCamVel.value.set(camVel[0] * 0.5, camVel[1] * 0.5, camVel[2] * 0.5);
@@ -3172,6 +3280,12 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
     ["photo  ·  P", [
       ["photoRes", "", "choice", ["1080p", "1440p", "4k", "5k"]],
       ["photoMax", "max settings for photos", "toggle"],
+      ["", "samples · more = smoother, slower", "sub"],
+      ["photoSamples", "", "choice", [1, 8, 16, 32]],
+      ["", "motion blur · track = car sharp, car = world sharp", "sub"],
+      ["photoBlur", "", "choice", ["off", "track", "car"]],
+      ["photoShutter", "shutter", "range", 0.004, 0.1, 0.002, (v) => "1/" + Math.round(1 / v) + " s"],
+      ["photoAperture", "depth of field (aperture)", "range", 0, 0.15, 0.005, (v) => (v > 0 ? Math.round(v * 1000) + " mm" : "off")],
     ]],
     ["performance", [
       ["quality", "", "choice", ["low", "medium", "high", "ultra"]],
@@ -3364,7 +3478,7 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
 // gameplay continues at its own settings. the HUD is html over the canvas, so photos come out clean.
 (function () {
   const PT = (window.PTFXNS = window.PTFXNS || {});
-  PT.defaults({ photoMax: true, photoRes: "4k" });
+  PT.defaults({ photoMax: true, photoRes: "4k", photoSamples: 16, photoBlur: "off", photoShutter: 1 / 30, photoAperture: 0, photoFocus: "car", photoFocusDist: 8 });
 
   let toast = null, toastT = 0;
   function say(msg) {
@@ -3430,23 +3544,148 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
       help = document.createElement("div"); help.className = "ptfx-keep";
       help.style.cssText = "position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:2147483647;padding:8px 14px;font:12px ForcedSquare,Arial,sans-serif;" +
         "color:#dfe6ff;background:rgba(7,9,16,.86);border:1px solid rgba(130,150,255,.3);pointer-events:none;white-space:nowrap";
-      help.textContent = "photo mode · WASD move · Q/E down/up · drag look · wheel fov · Z/X roll · shift fast · Tab orbit car · Enter capture (+copy) · ⌫ delete last · O folder · P / Esc exit";
+      help.textContent = "WASD move · Q/E down/up · drag look · wheel fov · Z/X roll · shift fast · Tab orbit car · click focus · Enter capture · M blur · F dof · L lightning · H hide ui · ⌫ delete last · O folder · P / Esc exit";
       document.body.appendChild(help);
+      buildUI();
     }
-    help.style.display = hide ? "block" : "none";
+    help.style.display = hide && !uiHidden ? "block" : "none";
+    ui.style.display = hide && !uiHidden ? "block" : "none";
+    if (!hide) showPreview(false);
   }
+
+  // ---------------------------------------------------------------- side panel (forza-style)
+  const cfg = PT.cfg;
+  const LOOK = ["exposure", "contrast", "saturation", "vignette", "timeOfDay"];   // photo-only: restored on exit
+  let ui = null, uiHidden = false, statusEl = null, pv = null, pvCtx = null, lookSaved = null;
+  let sig = "", idleSince = 0, pvFor = null, pvState = "";
+  const syncers = [];
+  const hhmm = (v) => `${String(Math.floor(v) % 24).padStart(2, "0")}:${String(Math.floor((v % 1) * 60)).padStart(2, "0")}`;
+  const ck = (key) => [() => cfg[key], (v) => { cfg[key] = v; }];
+  const SECTIONS = [
+    ["camera", [
+      ["range", "field of view", 8, 120, 1, () => fov, (v) => { fov = v; }, (v) => Math.round(v) + "°"],
+      ["range", "roll", -45, 45, 0.5, () => roll * 57.2958, (v) => { roll = v / 57.2958; }, (v) => (+v).toFixed(1) + "°"],
+    ]],
+    ["motion blur", [
+      ["seg", "photoBlur", ["off", "track", "car"]],
+      ["range", "shutter", 0.004, 0.1, 0.002, ...ck("photoShutter"), (v) => "1/" + Math.round(1 / v) + " s", () => cfg.photoBlur !== "off"],
+    ]],
+    ["depth of field · click to focus", [
+      ["range", "aperture", 0, 0.15, 0.005, ...ck("photoAperture"), (v) => (v > 0 ? Math.round(v * 1000) + " mm" : "off")],
+      ["seg", "photoFocus", ["car", "manual"], () => cfg.photoAperture > 0],
+      ["range", "focus distance", 0.5, 80, 0.5, ...ck("photoFocusDist"), (v) => (+v).toFixed(1) + " m", () => cfg.photoAperture > 0 && cfg.photoFocus === "manual"],
+    ]],
+    ["look · this photo only", [
+      ["range", "exposure", 0.3, 3, 0.05, ...ck("exposure"), (v) => (+v).toFixed(2)],
+      ["range", "contrast", 0.7, 1.5, 0.01, ...ck("contrast"), (v) => (+v).toFixed(2)],
+      ["range", "saturation", 0, 2, 0.01, ...ck("saturation"), (v) => (+v).toFixed(2)],
+      ["range", "vignette", 0, 1, 0.01, ...ck("vignette"), (v) => Math.round(v * 100) + "%"],
+      ["range", "time of day", 0, 23.9, 0.1, ...ck("timeOfDay"), hhmm],
+    ]],
+    ["capture", [
+      ["seg", "photoRes", ["1080p", "1440p", "4k", "5k"]],
+      ["seg", "photoSamples", [1, 8, 16, 32], null, "samples"],
+    ]],
+  ];
+
+  function buildUI() {
+    const st = document.createElement("style");
+    st.textContent = `
+#ptfx-photo-ui{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:2147483647;width:264px;max-height:calc(100vh - 110px);overflow:auto;
+  padding:10px 14px 14px;font:12px ForcedSquare,Arial,sans-serif;color:#e6f2ff;background:rgba(8,14,26,.84);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+  border:1px solid rgba(215,238,255,.16);display:none;scrollbar-width:none}
+#ptfx-photo-ui .ttl{font-size:13px;letter-spacing:.12em;text-transform:uppercase;text-shadow:0 0 6px rgba(150,215,255,.5)}
+#ptfx-photo-ui h4{margin:13px 0 4px;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:rgba(200,225,255,.55);font-weight:normal}
+#ptfx-photo-ui .r{display:grid;grid-template-columns:1fr auto;gap:1px 8px;align-items:center;margin:4px 0}
+#ptfx-photo-ui .v{color:rgba(220,236,255,.72);font-variant-numeric:tabular-nums}
+#ptfx-photo-ui input[type=range]{grid-column:1/3;width:100%;margin:2px 0 0;accent-color:#cfe8ff;height:14px}
+#ptfx-photo-ui .seg{display:flex;gap:4px;margin:4px 0}
+#ptfx-photo-ui .seg button,#ptfx-photo-ui .btns button{flex:1;padding:5px 0;font:inherit;color:#e6f2ff;background:rgba(205,232,255,.07);border:1px solid rgba(215,238,255,.18);cursor:pointer;
+  transition:background-color 120ms ease-out,transform 120ms ease-out}
+#ptfx-photo-ui .seg button[aria-pressed=true]{background:rgba(205,232,255,.28);border-color:rgba(232,246,255,.6)}
+#ptfx-photo-ui button:active{transform:scale(.97)}
+#ptfx-photo-ui .btns{display:flex;gap:6px;margin-top:12px}
+#ptfx-photo-ui .btns button.go{background:rgba(205,232,255,.24)}
+#ptfx-photo-ui .btns button:disabled{opacity:.35;cursor:default}
+#ptfx-photo-ui .st{margin-top:9px;font-size:11px;color:rgba(200,225,255,.62);min-height:1.3em}
+#ptfx-photo-ui .dim{opacity:.35;pointer-events:none}
+#ptfx-photo-ui .sl{font-size:10px;color:rgba(200,225,255,.5);margin-top:6px}`;
+    document.head.appendChild(st);
+    ui = document.createElement("div"); ui.id = "ptfx-photo-ui"; ui.className = "ptfx-keep";
+    ui.innerHTML = `<div class="ttl">photo mode</div>`;
+    for (const [title, rows] of SECTIONS) {
+      const h = document.createElement("h4"); h.textContent = title; ui.appendChild(h);
+      for (const row of rows) {
+        if (row[0] === "seg") {
+          const [, key, opts, when, label] = row;
+          if (label) { const l = document.createElement("div"); l.className = "sl"; l.textContent = label; ui.appendChild(l); }
+          const seg = document.createElement("div"); seg.className = "seg";
+          const btns = opts.map((o) => { const b = document.createElement("button"); b.textContent = o;
+            b.onclick = () => { cfg[key] = o; PT.save?.(); PT.onReset?.(); b.blur(); syncUI(); }; seg.appendChild(b); return b; });
+          ui.appendChild(seg);
+          syncers.push(() => { btns.forEach((b, i) => b.setAttribute("aria-pressed", String(cfg[key] === opts[i]))); if (when) seg.classList.toggle("dim", !when()); });
+        } else {
+          const [, label, min, max, step, get, set, fmt, when] = row;
+          const r = document.createElement("div"); r.className = "r";
+          const l = document.createElement("span"); l.textContent = label;
+          const v = document.createElement("span"); v.className = "v";
+          const inp = document.createElement("input"); Object.assign(inp, { type: "range", min, max, step });
+          inp.oninput = () => { set(+inp.value); v.textContent = fmt(+inp.value); };
+          inp.onchange = () => { PT.save?.(); inp.blur(); };   // give the keyboard back to the camera
+          r.append(l, v, inp); ui.appendChild(r);
+          syncers.push(() => { const x = get(); if (document.activeElement !== inp) inp.value = x; v.textContent = fmt(x); if (when) r.classList.toggle("dim", !when()); });
+        }
+      }
+    }
+    const btns = document.createElement("div"); btns.className = "btns";
+    const mk = (t, cls, fn) => { const b = document.createElement("button"); b.textContent = t; if (cls) b.className = cls; b.onclick = () => { fn(); b.blur(); }; btns.appendChild(b); return b; };
+    mk("capture ⏎", "go", () => PT.requestPhoto());
+    const lb = mk("lightning L", "", strike);
+    mk("folder O", "", () => window.ptfxNative?.photoOp("open"));
+    syncers.push(() => { lb.disabled = (PT.weather?.rain ?? 0) < 0.3; lb.title = lb.disabled ? "needs rain or a storm" : ""; });
+    ui.appendChild(btns);
+    statusEl = document.createElement("div"); statusEl.className = "st"; ui.appendChild(statusEl);
+    document.body.appendChild(ui);
+    // averaged preview (blur + depth of field are only visible in these renders)
+    pv = document.createElement("canvas"); pv.className = "ptfx-keep";
+    pv.style.cssText = "position:fixed;inset:0;width:100vw;height:100vh;z-index:2147483600;pointer-events:none;display:none";
+    document.body.appendChild(pv); pvCtx = pv.getContext("2d");
+  }
+  function syncUI() { if (ui) for (const f of syncers) f(); }
+  function showPreview(v) { if (pv) pv.style.display = v ? "block" : "none"; }
+  function strike() {
+    if ((PT.weather?.rain ?? 0) < 0.3) { PT.photoSay?.("lightning needs rain or a storm"); return; }
+    const T = PT.state.T, f = new T.Vector3(0, 0, -1).applyQuaternion((PT.lastRenderCam || cam).quaternion);
+    PT.strikeLightning?.(f);
+    requestAnimationFrame(() => requestAnimationFrame(() => PT.requestPhoto()));   // one frame lit, then capture
+    PT.photoSay?.("lightning!");
+  }
+  PT.onPreview = (buf, w, h) => {
+    if (!on || pvFor !== sig) return;   // the view changed while it rendered
+    if (pv.width !== w || pv.height !== h) { pv.width = w; pv.height = h; }
+    const img = pvCtx.createImageData(w, h), row = w * 4;
+    for (let y = 0; y < h; y++) img.data.set(buf.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+    pvCtx.putImageData(img, 0, 0);
+    showPreview(true); pvState = `preview · ${PT.lastPhotoSamples?.N ?? 1} samples`;
+  };
 
   function enter() {
     const src = PT.lastRenderCam || PT.gameCamera;
     if (!src || !PT.state.T) return;
+    // the car's velocity at the moment of pausing: photo motion blur needs it (paused, it reads zero)
+    PT.photoVel = PT.playerCar?.vel?.clone() ?? null;
+    PT.photoGhosts = (PT.ghostPoses || []).map((g) => ({ body: g.body, vel: g.vel?.clone() }));
     passSpace = 2; window.ptfxNative?.key("Space");  // the game's own pause (keydown + keyup)
     cam = src.clone();
     const e = new PT.state.T.Vector3(); const d = new PT.state.T.Vector3(0, 0, -1).applyQuaternion(src.quaternion);
     yaw = Math.atan2(-d.x, -d.z); pitch = Math.asin(Math.max(-1, Math.min(1, d.y))); roll = 0; fov = src.fov || 60;
-    on = true; hideUI(true); lastT = performance.now();
+    lookSaved = Object.fromEntries(LOOK.map((k) => [k, cfg[k]]));
+    PT.camBolted = false;   // the C-cycle hook doesn't run in photo mode: no gopro shake/fisheye left over
+    on = true; hideUI(true); lastT = performance.now(); sig = ""; pvFor = null; syncUI();
   }
   function exit() {
     on = false; hideUI(false); keys.clear();
+    if (lookSaved) { Object.assign(cfg, lookSaved); lookSaved = null; }   // the look sliders were for the photo only
     passSpace = 2; window.ptfxNative?.key("Space");  // unpause
   }
   PT.photoMode = { toggle: () => (on ? exit() : enter()), get on() { return on; } };
@@ -3461,6 +3700,15 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
     if (e.code === "Enter" && !e.repeat) { PT.requestPhoto(); return; }
     if (e.code === "Backspace" && !e.repeat && PT.lastPhoto) { window.ptfxNative?.photoOp("delete", PT.lastPhoto); PT.photoSay?.("deleted " + PT.lastPhoto); PT.lastPhoto = null; return; }
     if (e.code === "KeyO" && !e.repeat) { window.ptfxNative?.photoOp("open"); return; }
+    // photo-mode-only shortcuts: M motion blur, F depth of field, L lightning (rain/storm) + capture at the flash
+    const cyc = (key, opts, name) => { const i = (opts.indexOf(PT.cfg[key]) + 1) % opts.length; PT.cfg[key] = opts[i]; PT.save?.(); PT.onReset?.(); syncUI(); PT.photoSay?.(`${name} · ${opts[i]}`); };
+    if (e.code === "KeyM" && !e.repeat) { cyc("photoBlur", ["off", "track", "car"], "motion blur"); return; }
+    if (e.code === "KeyF" && !e.repeat) {
+      const steps = [0, 0.03, 0.09], i = (steps.findIndex((x) => Math.abs(x - (cfg.photoAperture || 0)) < 0.004) + 1) % steps.length;
+      cfg.photoAperture = steps[i]; PT.save?.(); syncUI(); PT.photoSay?.("depth of field · " + ["off", "soft", "strong"][i]); return;
+    }
+    if (e.code === "KeyH" && !e.repeat) { uiHidden = !uiHidden; hideUI(true); return; }
+    if (e.code === "KeyL" && !e.repeat) { strike(); return; }
     if (e.code === "Tab" && !e.repeat) {
       // orbit the car (where it was frozen) <-> free fly
       const car = PT.playerCar;
@@ -3474,15 +3722,47 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
     if (e.code === "Space" && passSpace > 0) { passSpace--; return; }
     if (on) { keys.delete(e.code); e.stopImmediatePropagation(); } }, true);
   let drag = null;
-  window.addEventListener("pointerdown", (e) => { if (on && !e.target.closest?.("#ptfx-panel")) { drag = [e.clientX, e.clientY]; e.stopImmediatePropagation(); } }, true);
+  let down = null;   // a click (no drag) sets the focal point
+  window.addEventListener("pointerdown", (e) => { if (on && !e.target.closest?.("#ptfx-panel, #ptfx-photo-ui")) { drag = [e.clientX, e.clientY]; down = { x: e.clientX, y: e.clientY, t: performance.now() }; e.stopImmediatePropagation(); } }, true);
   window.addEventListener("pointermove", (e) => {
     if (!on || !drag) return;
     if (orbit) { oYaw -= (e.clientX - drag[0]) * 0.006; oPitch = Math.max(-0.2, Math.min(1.45, oPitch + (e.clientY - drag[1]) * 0.005)); }
     else { yaw -= (e.clientX - drag[0]) * 0.004; pitch -= (e.clientY - drag[1]) * 0.004; }
     pitch = Math.max(-1.5, Math.min(1.5, pitch)); drag = [e.clientX, e.clientY];
   }, true);
-  window.addEventListener("pointerup", () => (drag = null), true);
-  window.addEventListener("wheel", (e) => { if (on && !e.target.closest?.("#ptfx-panel")) { fov = Math.max(8, Math.min(120, fov + e.deltaY * 0.03)); e.stopImmediatePropagation(); } }, { capture: true, passive: true });
+  window.addEventListener("pointerup", (e) => {
+    drag = null;
+    if (on && down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5 && performance.now() - down.t < 350) focusAt(e.clientX, e.clientY);
+    down = null;
+  }, true);
+
+  // focus on whatever is under the cursor: the track (fast grid raycast) or any car (three raycast on car meshes)
+  let rc = null, ring = null;
+  function focusAt(x, y) {
+    const T = PT.state.T, c = PT.lastRenderCam || cam;
+    if (!T || !c) return;
+    const dir = new T.Vector3((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1, 0.5).unproject(c).sub(c.position).normalize();
+    let d = PT.rayHit?.(c.position, dir, 3000, 0.05) ?? Infinity;
+    if (T.Raycaster) {
+      rc ??= new T.Raycaster();
+      rc.set(c.position, dir); rc.near = 0.05; rc.far = Math.min(d, 3000);
+      const top = (o) => { while (o && o.parent && o.parent.type !== "Scene") o = o.parent; return o; };
+      const cars = [PT.playerCar?.body, ...(PT.ghostPoses || []).map((g) => g.body)].filter(Boolean).map(top);
+      const hit = rc.intersectObjects(cars, true)[0];
+      if (hit) d = Math.min(d, hit.distance);
+    }
+    if (!isFinite(d)) { PT.photoSay?.("nothing there to focus on"); return; }
+    const fwd = new T.Vector3(0, 0, -1).applyQuaternion(c.quaternion);
+    cfg.photoFocus = "manual"; cfg.photoFocusDist = Math.max(0.5, +(d * dir.dot(fwd)).toFixed(1));
+    if (!(cfg.photoAperture > 0)) cfg.photoAperture = 0.03;
+    PT.save?.(); syncUI(); PT.photoSay?.(`focus · ${cfg.photoFocusDist} m`);
+    if (!ring) { ring = document.createElement("div"); ring.className = "ptfx-keep";
+      ring.style.cssText = "position:fixed;width:34px;height:34px;margin:-17px 0 0 -17px;border:1.5px solid rgba(235,248,255,.9);border-radius:50%;box-shadow:0 0 8px rgba(150,215,255,.6);" +
+        "pointer-events:none;z-index:2147483647;opacity:0;transition:opacity 500ms ease-out"; document.body.appendChild(ring); }
+    ring.style.left = x + "px"; ring.style.top = y + "px"; ring.style.transition = "none"; ring.style.opacity = "1";
+    requestAnimationFrame(() => { ring.style.transition = "opacity 600ms ease-out"; ring.style.opacity = "0"; });
+  }
+  window.addEventListener("wheel", (e) => { if (on && !e.target.closest?.("#ptfx-panel, #ptfx-photo-ui")) { fov = Math.max(8, Math.min(120, fov + e.deltaY * 0.03)); e.stopImmediatePropagation(); } }, { capture: true, passive: true });
 
   const prevHook = PT.cameraHook;
   PT.cameraHook = (gameCam, T) => {
@@ -3514,6 +3794,20 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
       cam.fov = fov; cam.lookAt(cam.position.clone().add(f));
     }
     cam.updateProjectionMatrix(); cam.updateMatrixWorld(true);
+    // live preview: once the view has been still ~0.4 s, render the real averaged photo (blur, depth of field)
+    // at half res and show it until anything changes
+    const W = PT.weather;
+    const nsig = cam.matrixWorld.elements.map((x) => x.toFixed(4)).join() + [fov, roll, cfg.photoBlur, cfg.photoShutter, cfg.photoAperture, cfg.photoFocus,
+      cfg.photoFocusDist, ...LOOK.map((k) => cfg[k]), (W?.flash ?? 0) > 0.05].join();
+    if (nsig !== sig) { sig = nsig; idleSince = now; pvFor = null; showPreview(false); pvState = ""; }
+    else if (!pvFor && now - idleSince > 400 && !PT.photoReq && !uiHidden) { pvFor = sig; pvState = "rendering preview…"; PT.requestPhoto({ preview: true }); }
+    if (statusEl) {
+      const blurTxt = cfg.photoBlur === "off" ? "blur off" : `blur ${cfg.photoBlur} 1/${Math.round(1 / cfg.photoShutter)}`;
+      const dofTxt = cfg.photoAperture > 0 ? `dof ${Math.round(cfg.photoAperture * 1000)}mm @ ${cfg.photoFocus === "manual" ? cfg.photoFocusDist + " m" : "car"}` : "dof off";
+      const t = `${blurTxt} · ${dofTxt} · ${pvState || (sig && pvFor ? "" : "move: live view")}`;
+      if (statusEl.textContent !== t) statusEl.textContent = t;
+      if ((PT.state.frame & 7) === 0) syncUI();
+    }
     return cam;
   };
 })();
