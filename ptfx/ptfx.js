@@ -2523,6 +2523,7 @@ void main(){
       // only car-mounted gopro cams shake (C cycle mounts + cinematic mount/ghost shots); game + chase cams stay steady
       const k = bolted ? (0.6 * sLow + 0.4 * s) * cfg.speedShake : 0;
       trauma = Math.max(0, trauma - dt * 1.3);
+      PT.trauma = trauma;   // the holo hud gets knocked by the same impacts
       let springing = false;
       if (rec.o) {   // stiff, slightly underdamped: one kick and a small bounce
         rec.w.addScaledVector(rec.o, -220 * dt).multiplyScalar(Math.exp(-dt * 14));
@@ -2881,6 +2882,160 @@ void main(){
     return cam;
   };
 })();
+// ptfx holo hud: replaces the game's flat racing bar (checkpoints, timers, speed) with a whitish holographic
+// visor (bare glowing type, no boxes). the side groups angle in towards you and sit higher than the centre (a curved visor, not a flat
+// strip), and the whole rig floats on a spring driven by the car: it swings against cornering force, dips
+// under braking, leans back on throttle and gets knocked by impacts (Asphalt-ish, but subtle).
+// the game's own hud stays in the dom (just invisible) so the game keeps updating it; values are read from it.
+(function () {
+  const PT = (window.PTFXNS = window.PTFXNS || {});
+  const cfg = PT.cfg;
+  PT.defaults({ holoHud: true, hudMotion: 1, hudScale: 1 });
+
+  const CSS = `
+body.ptfx-holo .game-ui .checkpoint-ui, body.ptfx-holo .game-ui .speedometer-ui, body.ptfx-holo .game-ui .timer-ui { opacity: 0 !important; pointer-events: none !important; }
+/* the game's other in-race bits, restyled to match: dark tinted glass + glowing white type */
+body.ptfx-holo .game-ui .game-toolbar-ui .button-container, body.ptfx-holo .game-ui .game-toolbar-ui .info-container {
+  background: rgba(8, 16, 30, .4) !important; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+body.ptfx-holo .game-ui .game-toolbar-ui .content { background: rgba(205, 232, 255, .06) !important; }
+body.ptfx-holo .game-ui .game-toolbar-ui .button { background: rgba(205, 232, 255, .08) !important; color: #eef8ff !important;
+  text-shadow: 0 0 6px rgba(150, 215, 255, .55); transition: background-color 150ms ease-out; }
+body.ptfx-holo .game-ui .game-toolbar-ui .button:hover { background: rgba(205, 232, 255, .18) !important; }
+body.ptfx-holo .game-ui .game-toolbar-ui .button img { filter: drop-shadow(0 0 4px rgba(150, 215, 255, .6)); }
+body.ptfx-holo .game-ui .game-toolbar-ui .content > div { color: #eef8ff !important; text-shadow: 0 0 6px rgba(150, 215, 255, .45); }
+body.ptfx-holo .game-ui .game-toolbar-ui .record { opacity: .6; }
+body.ptfx-holo .game-ui .hint-ui { background: rgba(8, 16, 30, .45) !important; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  border: 1px solid rgba(215, 238, 255, .18); text-shadow: 0 0 8px rgba(150, 215, 255, .5); }
+body.ptfx-holo .game-ui .hint-ui .key-binding { background: rgba(205, 232, 255, .12) !important; border: 1px solid rgba(215, 238, 255, .3); }
+/* menus: a touch darker and less saturated, closer to the mod's night vibe */
+body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contrast(1.08); }
+#ptfx-hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; perspective: 70vmin; perspective-origin: 50% 40%;
+  --u: calc(min(0.78vw, 1.35vh) * var(--hs, 1)); --ink: #eef8ff; --glow: rgba(150, 215, 255, .55); --line: rgba(215, 238, 255, .32);
+  font-family: ForcedSquare, Arial, sans-serif; color: var(--ink); opacity: 0; transition: opacity 220ms ease-out; }
+#ptfx-hud.on { opacity: 1; }
+#ptfx-hud .rig { position: absolute; inset: 0; transform-style: preserve-3d; will-change: transform; }
+#ptfx-hud .pan { position: absolute; bottom: calc(var(--u) * 1.4); transform-style: preserve-3d; }
+#ptfx-hud .glow { text-shadow: 0 0 calc(var(--u) * .5) var(--glow), 0 0 calc(var(--u) * 1.6) rgba(120, 200, 255, .25), 0 calc(var(--u) * .1) calc(var(--u) * .5) rgba(0, 8, 20, .55); }
+#ptfx-hud .lbl { text-shadow: 0 0 calc(var(--u) * .4) rgba(0, 8, 20, .7); }
+#ptfx-hud .lbl { font-size: calc(var(--u) * .78); letter-spacing: .22em; text-transform: uppercase; opacity: .62; }
+#ptfx-hud .it { display: inline-block; transform: skewX(-8deg); }
+/* centre: timer plate, leaning back like a dash read-out */
+#ptfx-hud .mid { left: 50%; transform: translateX(-50%) rotateX(16deg); transform-origin: 50% 100%; text-align: center; min-width: calc(var(--u) * 30); }
+#ptfx-hud .cur { font-size: calc(var(--u) * 3.6); line-height: 1; letter-spacing: .04em; font-variant-numeric: tabular-nums; }
+#ptfx-hud .row { display: flex; justify-content: space-between; gap: calc(var(--u) * 2.4); margin-top: calc(var(--u) * .55); }
+#ptfx-hud .row > div { display: flex; flex-direction: column; gap: calc(var(--u) * .15); }
+#ptfx-hud .row > div:last-child { align-items: flex-end; }
+#ptfx-hud .sm { font-size: calc(var(--u) * 1.35); font-variant-numeric: tabular-nums; }
+#ptfx-hud .diff.green { color: #b9ffd9; --glow: rgba(110, 255, 180, .6); }
+#ptfx-hud .diff.red { color: #ffc4cf; --glow: rgba(255, 110, 140, .6); }
+#ptfx-hud .split { position: absolute; left: 50%; bottom: calc(100% + var(--u) * .8); transform: translateX(-50%); font-size: calc(var(--u) * 1.6);
+  opacity: 0; transition: opacity 180ms ease-out, transform 180ms ease-out; white-space: nowrap; }
+#ptfx-hud .split.show { opacity: 1; transform: translateX(-50%) translateY(calc(var(--u) * -.3)); }
+#ptfx-hud .split.green { color: #b9ffd9; } #ptfx-hud .split.red { color: #ffc4cf; }
+/* sides: higher than the centre and angled in, so the visor curves up towards the edges */
+#ptfx-hud .lft { left: calc(var(--u) * 3); bottom: calc(var(--u) * 2.6); transform: rotateY(24deg) rotateZ(-3deg); transform-origin: 0% 100%; }
+#ptfx-hud .rgt { right: calc(var(--u) * 3); bottom: calc(var(--u) * 2.6); transform: rotateY(-24deg) rotateZ(3deg); transform-origin: 100% 100%; text-align: right; }
+#ptfx-hud .cp { font-size: calc(var(--u) * 2.6); line-height: 1; }
+#ptfx-hud .pips { display: flex; gap: calc(var(--u) * .3); margin-top: calc(var(--u) * .6); }
+#ptfx-hud .pip { width: calc(var(--u) * 1.1); height: calc(var(--u) * .35); border: 1px solid var(--line); transform: skewX(-20deg); transition: background-color 200ms ease-out, box-shadow 200ms ease-out; }
+#ptfx-hud .pip.on { background: var(--ink); box-shadow: 0 0 calc(var(--u) * .6) var(--glow); }
+#ptfx-hud .spd { font-size: calc(var(--u) * 4.4); line-height: .95; font-variant-numeric: tabular-nums; }
+#ptfx-hud .unit { font-size: calc(var(--u) * .95); letter-spacing: .2em; opacity: .65; margin-left: calc(var(--u) * .4); }
+`;
+
+  let root = null, el = {}, last = {}, splitT = 0;
+
+  function build() {
+    const st = document.createElement("style"); st.textContent = CSS; document.head.appendChild(st);
+    root = document.createElement("div"); root.id = "ptfx-hud";
+    root.innerHTML = `<div class="rig">
+      <div class="pan lft"><div class="lbl">checkpoint</div><div class="cp glow it" data-k="cp">0/0</div><div class="pips" data-k="pips"></div></div>
+      <div class="pan mid">
+        <div class="split glow it" data-k="split"></div>
+        <div class="lbl">current</div><div class="cur glow it" data-k="cur">00:00.000</div>
+        <div class="row"><div><span class="lbl">record</span><span class="sm glow it" data-k="rec">---</span></div>
+          <div><span class="lbl">difference</span><span class="sm glow it diff" data-k="diff">---</span></div></div>
+      </div>
+      <div class="pan rgt">
+        <div><span class="spd glow it" data-k="spd">0</span><span class="unit">km/h</span></div>
+      </div></div>`;
+    document.body.appendChild(root);
+    for (const n of root.querySelectorAll("[data-k]")) el[n.dataset.k] = n;
+    el.rig = root.querySelector(".rig");
+  }
+
+  const txt = (q) => document.querySelector(q)?.textContent.trim() ?? "";
+  function set(k, v) { if (last[k] !== v) { last[k] = v; el[k].textContent = v; } }
+
+  // spring state for the floating rig
+  const sp = { x: 0, y: 0, ry: 0, rx: 0, rz: 0, vx: 0, vy: 0, vry: 0, vrx: 0, vrz: 0 };
+  let prevVel = null, aS = [0, 0, 0], lastT = performance.now();
+
+  function motion(now) {
+    const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+    const car = PT.playerCar, m = cfg.hudMotion;
+    let ax = 0, ay = 0, af = 0;
+    if (car && performance.now() - car.at < 300 && prevVel && dt > 0) {
+      const a = car.vel.clone().sub(prevVel).divideScalar(dt);
+      if (a.length() < 400) { ax = a.dot(car.right); ay = a.dot(car.up); af = a.dot(car.fwd); }
+    }
+    prevVel = car ? car.vel.clone() : null;
+    // velocity is noisy frame to frame (physics ticks vs frames): smooth the acceleration before using it
+    const k = 1 - Math.exp(-dt / 0.12);
+    aS[0] += (ax - aS[0]) * k; aS[1] += (ay - aS[1]) * k; aS[2] += (af - aS[2]) * k;
+    const cl = (v, l) => Math.max(-l, Math.min(l, v));
+    // targets: lags against the push (cornering right → hud swings left), dips + tilts forward on braking
+    const tgt = { x: cl(-aS[0] * 0.22, 3.2) * m, y: cl(aS[2] * 0.06 - aS[1] * 0.05, 1.6) * m,
+                  ry: cl(-aS[0] * 0.18, 4) * m, rx: cl(-aS[2] * 0.09, 3) * m, rz: cl(aS[0] * 0.07, 1.8) * m };
+    // impacts (speedfx trauma) knock it
+    const tr = (PT.trauma || 0) * m;
+    for (const key of ["x", "y", "ry", "rx", "rz"]) {
+      const v = "v" + key;
+      sp[v] += ((tgt[key] - sp[key]) * 90 - sp[v] * 11) * dt;   // stiff, a touch underdamped
+      sp[key] += sp[v] * dt;
+    }
+    const jit = tr > 0.01 ? Math.sin(now * 0.061) * tr * 0.9 : 0;
+    // x/y in hud units (vmin-ish), rotations in degrees
+    el.rig.style.transform = `translate3d(${(sp.x + jit).toFixed(3)}vmin, ${(sp.y - jit * 0.6).toFixed(3)}vmin, 0) ` +
+      `rotateX(${sp.rx.toFixed(3)}deg) rotateY(${sp.ry.toFixed(3)}deg) rotateZ(${(sp.rz + jit * 0.8).toFixed(3)}deg)`;
+  }
+
+  function tick(now) {
+    requestAnimationFrame(tick);
+    const want = cfg.enabled !== false && cfg.holoHud;
+    document.body.classList.toggle("ptfx-holo", !!want);
+    const timer = document.querySelector(".game-ui .timer-ui");
+    // visible only while racing (game hud present), not in photo mode or cinematic shots
+    const show = want && timer && timer.offsetParent !== null && !document.body.classList.contains("ptfx-photo") && !PT.cineActive;
+    if (!root) { if (!show) return; build(); }
+    root.classList.toggle("on", !!show);
+    if (!show) return;
+    root.style.setProperty("--hs", cfg.hudScale);
+
+    // checkpoints "2/6" + pips
+    const cp = txt(".game-ui .checkpoint-ui span");
+    set("cp", cp || "0/0");
+    if (last.pipsFor !== cp) {
+      last.pipsFor = cp;
+      const [a, b] = cp.split("/").map((x) => parseInt(x, 10) || 0);
+      el.pips.innerHTML = Array.from({ length: Math.min(b, 24) }, (_, i) => `<div class="pip${i < a ? " on" : ""}"></div>`).join("");
+    }
+    set("spd", txt(".game-ui .speedometer-ui .container > span:first-child") || "0");
+    set("cur", txt(".game-ui .timer-ui .center .time p") || "--:--.---");
+    set("rec", txt(".game-ui .timer-ui .left .time p") || "---");
+    const dp = document.querySelector(".game-ui .timer-ui .right .time p");
+    set("diff", dp?.textContent.trim() || "---");
+    const dc = dp?.classList.contains("green") ? "green" : dp?.classList.contains("red") ? "red" : "";
+    if (last.dc !== dc) { last.dc = dc; el.diff.className = "sm glow it diff " + dc; }
+    // checkpoint split: the game fills .checkpoint-time briefly when you cross one
+    const split = txt(".game-ui .timer-ui .center .checkpoint-time") || txt(".game-ui .timer-ui .right .checkpoint-time");
+    if (split && split !== last.split) { set("split", split); splitT = now + 2200; const c = /^-/.test(split) ? "green" : /^\+/.test(split) ? "red" : ""; el.split.className = "split glow it show " + c; }
+    if (!split) last.split = "";
+    if (splitT && now > splitT) { splitT = 0; el.split.classList.remove("show"); }
+    motion(now);
+  }
+  requestAnimationFrame(tick);
+})();
 // ptfx settings panel. F9 toggles it. keyboard-opened and used constantly, so it appears instantly:
 // no open/close animation. styled after polytrack's own ui (navy panels, ForcedSquare, square corners).
 (function () {
@@ -2964,6 +3119,11 @@ void main(){
       ["goproFov", "field of view", "range", -30, 30, 1, (v) => (v > 0 ? "+" : "") + v + "°"],
       ["goproEdgeBlur", "edge blur", "range", 0, 2, 0.05, pct],
       ["goproAberration", "chromatic aberration", "range", 0, 3, 0.05, pct],
+    ]],
+    ["hud", [
+      ["holoHud", "holo racing hud", "toggle"],
+      ["hudMotion", "reacts to car movement", "range", 0, 2, 0.05, pct],
+      ["hudScale", "size", "range", 0.7, 1.4, 0.05, pct],
     ]],
     ["image", [
       ["tone", "filmic tonemap", "range", 0, 1, 0.05, pct],
