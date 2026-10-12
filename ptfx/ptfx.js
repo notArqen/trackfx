@@ -2788,7 +2788,8 @@ void main(){
   };
 
   let lastBody = null, acH = null, acU = null, acRoll = 0;   // loose (AC traffic) chase state
-  let idx = 0, cam = null, cur = null, look = null, lastPos = null, lastT = performance.now(), ray = null, toast = null, toastT = 0;
+  // default view: the assetto-corsa style loose chase (user's pick); C still cycles back to the game camera
+  let idx = Math.max(0, VIEWS.findIndex((v) => v.kind === "loose")), cam = null, cur = null, look = null, lastPos = null, lastT = performance.now(), ray = null, toast = null, toastT = 0;
   const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName) || e.target?.isContentEditable;
 
   function say(msg) {
