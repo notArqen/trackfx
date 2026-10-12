@@ -2626,10 +2626,10 @@ void main(){
       const straight = heading.length > 20 && heading.every((h) => h.dot(car.fwd) > 0.995);
       if (driving && straight && frontCooldown <= 0 && why !== "teleport" && Math.random() < 0.5) {
         s.kind = Math.random() < 0.5 ? "front" : "sideTrack"; s.len = 2.5; frontCooldown = 15;
-      } else { s.kind = ["chase", "chase", "chaseLow", "chaseHigh", "chaseWide"][Math.floor(Math.random() * 5)]; s.len = 8; }
+      } else { s.kind = ["chase", "chase", "chaseLow", "chaseHigh", "chaseWide", "chaseLoose"][Math.floor(Math.random() * 6)]; s.len = 8; }
       return s;
     }
-    const pool = ["mount", "mount", "trackside", "trackside", "drone", "flyby", "orbit", "chaseLow", "ghost"];
+    const pool = ["mount", "mount", "trackside", "trackside", "drone", "flyby", "orbit", "chaseLow", "chaseLoose", "ghost"];
     for (let attempt = 0; attempt < 6; attempt++) {
       s.kind = pool[Math.floor(Math.random() * pool.length)];
       if (car.speed < 3 && (s.kind === "trackside" || s.kind === "flyby")) continue;
@@ -2695,6 +2695,15 @@ void main(){
         const gat = (o) => g.pos.clone().addScaledVector(g.right, o[0]).addScaledVector(g.up, o[1]).addScaledVector(g.fwd, o[2]);
         pos = gat(shot.rear ? [-0.55, 0.22, -2.0] : [0.55, 0.18, 2.0]); target = gat(shot.rear ? [-2, 0.1, -22] : [2.5, 0, 22]);
         up = g.up.clone(); shot.fov = 86; free = false; break;
+      }
+      case "chaseLoose": {
+        // the original floaty "loose" chase from the C cycle, unchanged: lazy 0.45 s spring that lags at speed
+        // and swings wide in corners. too loose to drive with, looks good as a shot
+        const want = car.pos.clone().addScaledVector(car.fwd, -6.5).add(new T.Vector3(0, 1.8, 0));
+        shot.cur = shot.cur && !PT.cineCut ? shot.cur.lerp(want, k(0.45)) : want;
+        const tgt = car.pos.clone().addScaledVector(car.fwd, 3);
+        shot.look = shot.look && !PT.cineCut ? shot.look.lerp(tgt, k(0.27)) : tgt;
+        pos = shot.cur.clone(); target = shot.look.clone(); shot.fov = 65; free = false; break;
       }
       case "chase": case "chaseLow": case "chaseHigh": case "chaseWide": {
         const c = chasePose(T, car, shot.kind);
@@ -2778,7 +2787,7 @@ void main(){
     return best;
   };
 
-  let lastBody = null;
+  let lastBody = null, acH = null, acU = null, acRoll = 0;   // loose (AC traffic) chase state
   let idx = 0, cam = null, cur = null, look = null, lastPos = null, lastT = performance.now(), ray = null, toast = null, toastT = 0;
   const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName) || e.target?.isContentEditable;
 
@@ -2846,14 +2855,31 @@ void main(){
 
     // respawn / restart: snap instead of swooping across the map
     if (lastPos && lastPos.distanceTo(car.pos) > 10) { cur = null; look = null; PT.camCut = true; }
+    const carDelta = lastPos && !PT.camCut ? car.pos.clone().sub(lastPos) : null;
     lastPos = car.pos.clone();
     const k = (tau) => 1 - Math.exp(-dt / tau);
     const W = new T.Vector3(0, 1, 0);
     const at = (o) => car.pos.clone().addScaledVector(car.right, o[0]).addScaledVector(car.up, o[1]).addScaledVector(car.fwd, o[2]);
-    let pos, target, up = W.clone(), fov = 65, smooth = 0, chase = true;
+    let pos, target, up = W.clone(), fov = 65, smooth = 0, chase = true, carry = false;
     switch (v.kind) {
       case "locked": pos = at([0, 1.3, -5.5]); target = at([0, 0.4, 4]); up = car.up.clone(); break;   // bolted on: rolls with the car
-      case "loose": pos = car.pos.clone().addScaledVector(car.fwd, -6.5).addScaledVector(W, 1.8); target = car.pos.clone().addScaledVector(car.fwd, 3); smooth = 0.45; break;
+      // assetto-corsa style "traffic dodging" chase: low and close, glued to the car's POSITION, but its HEADING
+      // trails the car's. weaving between lanes makes the car yaw and slide around in frame while the camera
+      // swings after it, leaning a little into the turn. no positional lag, so it never drifts back at speed
+      case "loose": {
+        const resetL = !acH || PT.camCut;
+        if (resetL) { acH = car.fwd.clone(); acU = car.up.clone(); acRoll = 0; }
+        const prevH = acH.clone();
+        acH.lerp(car.fwd, k(0.32)).normalize(); acU.lerp(car.up, k(0.2)).normalize();
+        // signed yaw rate of the smoothed heading → lean into the turn
+        const yaw = dt > 0 ? Math.asin(Math.max(-1, Math.min(1, prevH.clone().cross(acH).dot(acU)))) / dt : 0;
+        acRoll += (Math.max(-0.07, Math.min(0.07, -yaw * 0.05)) - acRoll) * k(0.15);
+        const kmh = car.speed * 3.6;
+        pos = car.pos.clone().addScaledVector(acH, -(4.9 + Math.min(1, kmh / 300) * 0.8)).addScaledVector(acU, 1.15);
+        target = car.pos.clone().addScaledVector(acH, 6).addScaledVector(acU, 0.45);
+        up = acU.clone().applyAxisAngle(acH, acRoll);
+        fov = 70 + Math.min(1, kmh / 300) * 8; smooth = 0; break;
+      }
       case "drift": {
         const dir = car.vel.length() > 3 ? car.vel.clone().normalize() : car.fwd.clone();   // where it's going, not where it points
         pos = car.pos.clone().addScaledVector(dir, -6).addScaledVector(W, 1.6); target = car.pos.clone().addScaledVector(dir, 4); smooth = 0.15; break;
@@ -2874,6 +2900,7 @@ void main(){
       }
     }
     if (chase) pos = unblock(T, car.pos, pos);
+    if (carry && carDelta) { cur?.add(carDelta); look?.add(carDelta); }
     cur = !cur || smooth === 0 ? pos : cur.lerp(pos, k(smooth));
     look = !look || smooth === 0 ? target : look.lerp(target, k(Math.max(0.05, smooth * 0.6)));
     if (!cur || PT.camCut) PT.camCut = true;
