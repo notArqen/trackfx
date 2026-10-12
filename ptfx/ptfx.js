@@ -2785,7 +2785,7 @@ void main(){
     if (!toast) {
       toast = document.createElement("div");
       toast.style.cssText = "position:fixed;left:50%;top:22px;transform:translateX(-50%);z-index:2147483647;padding:7px 14px;" +
-        "font:13px ForcedSquare,Arial,sans-serif;color:#fff;background:rgba(14,22,52,.88);border:1px solid rgba(120,150,255,.35);pointer-events:none;transition:opacity 200ms ease-out";
+        "font:13px ForcedSquare,Arial,sans-serif;color:#fff;background:rgba(7,9,16,.9);border:1px solid rgba(120,150,255,.35);pointer-events:none;transition:opacity 200ms ease-out";
       document.body.appendChild(toast);
     }
     toast.textContent = msg; toast.style.opacity = "1";
@@ -3001,19 +3001,28 @@ void main(){
   const saveOpen = () => { try { localStorage.setItem(OPEN_KEY, JSON.stringify([...openSet])); } catch {} };
 
   const CSS = `
-#ptfx-panel{position:fixed;top:12px;right:12px;width:300px;max-height:calc(100vh - 24px);overflow-y:auto;z-index:2147483647;
-  font-family:ForcedSquare,Arial,sans-serif;color:#dfe6ff;background:rgba(14,22,52,.92);border:1px solid rgba(120,150,255,.28);
-  box-shadow:0 1px 0 rgba(255,255,255,.06) inset,0 12px 40px rgba(0,0,0,.45);padding:0 0 10px;user-select:none;cursor:default;display:none}
+#ptfx-panel{--bg:rgba(7,9,16,.9);--line:rgba(130,150,255,.16);--acc:#7c8cff;--acc2:#3fd6ff;--txt:#d5dbf2;--dim:#6f7aa6;
+  position:fixed;top:12px;right:12px;width:304px;max-height:calc(100vh - 24px);overflow-y:auto;z-index:2147483647;scrollbar-width:thin;scrollbar-color:#2a3260 transparent;
+  font-family:ForcedSquare,Arial,sans-serif;color:var(--txt);background:var(--bg);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);
+  border:1px solid var(--line);box-shadow:0 1px 0 rgba(255,255,255,.05) inset,0 18px 50px rgba(0,0,0,.6),0 0 0 1px rgba(0,0,0,.5);padding:0 0 10px;user-select:none;cursor:default;display:none}
 #ptfx-panel.open{display:block}
 #ptfx-panel *{box-sizing:border-box}
-#ptfx-panel header{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 10px;border-bottom:1px solid rgba(120,150,255,.18);
-  position:sticky;top:0;background:rgba(14,22,52,.98);z-index:1}
-#ptfx-panel h1{margin:0;font-size:17px;font-weight:400;letter-spacing:.04em;color:#fff}
-#ptfx-panel .hint{font-size:11px;color:#8b98c9}
-#ptfx-panel section{border-bottom:1px solid rgba(120,150,255,.12)}
-#ptfx-panel .cat{display:flex;align-items:center;justify-content:space-between;width:100%;padding:11px 14px;font:inherit;font-size:12px;letter-spacing:.12em;
-  text-transform:uppercase;color:#9fb0ff;background:none;border:0;cursor:pointer;text-align:left}
-@media (hover:hover) and (pointer:fine){#ptfx-panel .cat:hover{background:rgba(255,255,255,.04);color:#c3cdff}}
+#ptfx-panel header{display:flex;align-items:center;gap:8px;padding:13px 14px 11px;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:1;
+  background:radial-gradient(rgba(130,150,255,.13) 1px,transparent 1.4px) 0 0/9px 9px,rgba(5,7,13,.97)}
+#ptfx-panel header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,var(--acc),var(--acc2) 55%,transparent)}
+#ptfx-panel header>div{flex:1}
+#ptfx-panel h1{margin:0;font-size:17px;font-weight:400;letter-spacing:.16em;text-transform:uppercase;color:#fff}
+#ptfx-panel h1 b{font-weight:400;color:var(--acc2);text-shadow:0 0 12px rgba(63,214,255,.55)}
+#ptfx-panel .hint{font-size:11px;color:var(--dim);letter-spacing:.04em}
+#ptfx-panel .help{width:22px;height:22px;font:inherit;font-size:13px;color:var(--acc2);background:rgba(63,214,255,.07);border:1px solid rgba(63,214,255,.35);cursor:pointer;padding:0;
+  transition:transform 140ms cubic-bezier(.23,1,.32,1),background-color 140ms ease}
+#ptfx-panel .help:active{transform:scale(.94)}
+@media (hover:hover) and (pointer:fine){#ptfx-panel .help:hover{background:rgba(63,214,255,.16)}}
+#ptfx-panel section{border-bottom:1px solid rgba(130,150,255,.09)}
+#ptfx-panel .cat{display:flex;align-items:center;justify-content:space-between;width:100%;padding:11px 14px;font:inherit;font-size:12px;letter-spacing:.14em;
+  text-transform:uppercase;color:#8e9bd6;background:none;border:0;cursor:pointer;text-align:left;transition:color 140ms ease,background-color 140ms ease}
+@media (hover:hover) and (pointer:fine){#ptfx-panel .cat:hover{background:rgba(124,140,255,.07);color:#c3cdff}}
+#ptfx-panel section.open .cat{color:#fff;box-shadow:2px 0 0 var(--acc2) inset}
 #ptfx-panel .cat i{width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);
   transition:transform 200ms cubic-bezier(.23,1,.32,1)}
 #ptfx-panel section.open .cat i{transform:rotate(45deg)}
@@ -3021,38 +3030,37 @@ void main(){
 #ptfx-panel section.open .body{grid-template-rows:1fr}
 #ptfx-panel .inner{overflow:hidden;padding:0 14px}
 #ptfx-panel section.open .inner{padding-bottom:8px}
-#ptfx-panel h3{margin:10px 0 2px;font-size:10px;font-weight:400;letter-spacing:.14em;text-transform:uppercase;color:#6070b8}
+#ptfx-panel h3{margin:10px 0 2px;font-size:10px;font-weight:400;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
 @media (prefers-reduced-motion:reduce){#ptfx-panel .body,#ptfx-panel .cat i{transition:none}}
 #ptfx-panel .row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:4px 10px;padding:5px 0}
-#ptfx-panel .row label{font-size:13px;color:#c9d2f5}
-#ptfx-panel .val{font-size:12px;color:#fff;font-variant-numeric:tabular-nums;min-width:52px;text-align:right}
+#ptfx-panel .row label{font-size:13px;color:var(--txt)}
+#ptfx-panel .val{font-size:12px;color:var(--acc2);font-variant-numeric:tabular-nums;min-width:52px;text-align:right}
 #ptfx-panel input[type=range]{grid-column:1/-1;-webkit-appearance:none;appearance:none;width:100%;height:18px;background:transparent;margin:0;cursor:pointer}
-#ptfx-panel input[type=range]::-webkit-slider-runnable-track{height:4px;background:linear-gradient(90deg,#6f86ff var(--p),rgba(255,255,255,.12) var(--p))}
-#ptfx-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:16px;margin-top:-6px;background:#fff;border:0;
-  box-shadow:0 0 0 1px rgba(0,0,0,.35),0 2px 6px rgba(0,0,0,.4);transition:transform 120ms cubic-bezier(.23,1,.32,1)}
+#ptfx-panel input[type=range]::-webkit-slider-runnable-track{height:3px;background:linear-gradient(90deg,var(--acc),var(--acc2) var(--p),rgba(255,255,255,.09) var(--p))}
+#ptfx-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:16px;margin-top:-6.5px;background:#eaf6ff;border:0;
+  box-shadow:0 0 0 1px rgba(0,0,0,.5),0 0 10px rgba(63,214,255,.45);transition:transform 120ms cubic-bezier(.23,1,.32,1)}
 #ptfx-panel input[type=range]:active::-webkit-slider-thumb{transform:scaleX(.8)}
 #ptfx-panel input[type=range]:focus{outline:none}
-#ptfx-panel input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 2px #6f86ff}
-#ptfx-panel .tog{width:38px;height:20px;padding:2px;border:1px solid rgba(120,150,255,.35);background:rgba(255,255,255,.06);cursor:pointer;
-  transition:background-color 160ms ease,border-color 160ms ease}
-#ptfx-panel .tog i{display:block;width:14px;height:14px;background:#8b98c9;transition:transform 160ms cubic-bezier(.23,1,.32,1),background-color 160ms ease}
-#ptfx-panel .tog[aria-checked=true]{background:#3f55d9;border-color:#6f86ff}
+#ptfx-panel input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 2px var(--acc2)}
+#ptfx-panel .tog{width:38px;height:20px;padding:2px;border:1px solid rgba(130,150,255,.3);background:rgba(255,255,255,.04);cursor:pointer;
+  transition:background-color 160ms ease,border-color 160ms ease,box-shadow 160ms ease}
+#ptfx-panel .tog i{display:block;width:14px;height:14px;background:#5b678f;transition:transform 160ms cubic-bezier(.23,1,.32,1),background-color 160ms ease}
+#ptfx-panel .tog[aria-checked=true]{background:linear-gradient(90deg,rgba(124,140,255,.5),rgba(63,214,255,.45));border-color:var(--acc2);box-shadow:0 0 12px rgba(63,214,255,.25)}
 #ptfx-panel .tog[aria-checked=true] i{transform:translateX(18px);background:#fff}
 #ptfx-panel .tog:active{transform:scale(.96)}
 #ptfx-panel .master{margin:0}
-#ptfx-panel footer{display:flex;gap:8px;padding:10px 14px 0}
-#ptfx-panel button.btn{flex:1;font:inherit;font-size:12px;color:#dfe6ff;background:rgba(255,255,255,.06);border:1px solid rgba(120,150,255,.3);
+#ptfx-panel footer{display:flex;gap:8px;padding:12px 14px 0}
+#ptfx-panel button.btn{flex:1;font:inherit;font-size:12px;letter-spacing:.06em;color:var(--txt);background:rgba(124,140,255,.07);border:1px solid rgba(130,150,255,.28);
   padding:7px 0;cursor:pointer;transition:transform 140ms cubic-bezier(.23,1,.32,1),background-color 140ms ease}
 #ptfx-panel button.btn:active{transform:scale(.97)}
-@media (hover:hover) and (pointer:fine){#ptfx-panel button.btn:hover{background:rgba(255,255,255,.11)}}
+@media (hover:hover) and (pointer:fine){#ptfx-panel button.btn:hover{background:rgba(124,140,255,.16)}}
 #ptfx-panel .row.choice{display:block}
 #ptfx-panel .seg{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
-#ptfx-panel .seg button{font:inherit;font-size:12px;color:#c9d2f5;background:rgba(255,255,255,.05);border:1px solid rgba(120,150,255,.22);padding:6px 0;cursor:pointer;
-  transition:transform 140ms cubic-bezier(.23,1,.32,1),background-color 140ms ease,border-color 140ms ease}
+#ptfx-panel .seg button{font:inherit;font-size:12px;color:#aab4dd;background:rgba(255,255,255,.035);border:1px solid rgba(130,150,255,.18);padding:6px 0;cursor:pointer;
+  transition:transform 140ms cubic-bezier(.23,1,.32,1),background-color 140ms ease,border-color 140ms ease,color 140ms ease}
 #ptfx-panel .seg button:active{transform:scale(.97)}
-#ptfx-panel .seg button[aria-pressed=true]{background:#3f55d9;border-color:#6f86ff;color:#fff}
-#ptfx-panel.off section{opacity:.4;pointer-events:none}
-#ptfx-panel footer{padding-top:12px}
+#ptfx-panel .seg button[aria-pressed=true]{background:linear-gradient(180deg,rgba(124,140,255,.38),rgba(63,214,255,.2));border-color:var(--acc2);color:#fff}
+#ptfx-panel.off section{opacity:.35;pointer-events:none}
 `;
 
   function toggle(key, onChange) {
@@ -3071,9 +3079,12 @@ void main(){
     const st = document.createElement("style"); st.textContent = CSS; document.head.appendChild(st);
     panel = document.createElement("div"); panel.id = "ptfx-panel";
     const head = document.createElement("header");
-    head.innerHTML = `<div><h1>polytrack fx</h1><div class="hint">F9 to close</div></div>`;
+    head.innerHTML = `<div><h1><b>FX</b> mod</h1><div class="hint">unofficial · F9 to close</div></div>`;
     const master = toggle("enabled", () => panel.classList.toggle("off", cfg.enabled === false));
     master.classList.add("master"); master.title = "all effects";
+    const hb = document.createElement("button"); hb.className = "help"; hb.textContent = "?"; hb.title = "controls & about  ·  H";
+    hb.onclick = () => { PT.intro?.open(); hb.blur(); };
+    head.appendChild(hb);
     head.appendChild(master); syncers.push(master._sync);
     panel.appendChild(head);
     panel.classList.toggle("off", cfg.enabled === false);
@@ -3172,7 +3183,7 @@ void main(){
     if (!toast) {
       toast = document.createElement("div");
       toast.style.cssText = "position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:2147483647;padding:9px 16px;" +
-        "font:13px ForcedSquare,Arial,sans-serif;color:#fff;background:rgba(14,22,52,.92);border:1px solid rgba(120,150,255,.35);" +
+        "font:13px ForcedSquare,Arial,sans-serif;color:#fff;background:rgba(7,9,16,.9);border:1px solid rgba(120,150,255,.35);" +
         "pointer-events:none;transition:opacity 200ms ease-out";
       document.body.appendChild(toast);
     }
@@ -3230,7 +3241,7 @@ void main(){
     if (!help) {
       help = document.createElement("div"); help.className = "ptfx-keep";
       help.style.cssText = "position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:2147483647;padding:8px 14px;font:12px ForcedSquare,Arial,sans-serif;" +
-        "color:#dfe6ff;background:rgba(14,22,52,.82);border:1px solid rgba(120,150,255,.3);pointer-events:none;white-space:nowrap";
+        "color:#dfe6ff;background:rgba(7,9,16,.86);border:1px solid rgba(130,150,255,.3);pointer-events:none;white-space:nowrap";
       help.textContent = "photo mode · WASD move · Q/E down/up · drag look · wheel fov · Z/X roll · shift fast · Tab orbit car · Enter capture (+copy) · ⌫ delete last · O folder · P / Esc exit";
       document.body.appendChild(help);
     }
@@ -3317,4 +3328,105 @@ void main(){
     cam.updateProjectionMatrix(); cam.updateMatrixWorld(true);
     return cam;
   };
+})();
+// first-run intro card + keybind cheat sheet. shows once per browser (localStorage), H reopens it, the panel has a ? button.
+// keyboard-opened things stay instant (no animation on H); the first-run card gets a short enter since it is rare.
+(function () {
+  const PT = (window.PTFXNS = window.PTFXNS || {});
+  const KEY = "ptfx.intro.seen.v1";
+  const native = !!window.ptfxNative;   // electron build: the photo folder keys exist, and photo mode can pause the race
+  const KEYS = [
+    ["F9", "effects panel: every slider and toggle"],
+    ["H", "this screen"],
+    ["C", "cycle camera views  (shift+C back)"],
+    ["K", "cinematic cameras on / off"],
+    ["E  or  /", "headlights on / off"],
+    ["P", native ? "photo mode (pauses the race, free camera)" : "photo mode: free camera (Space pauses the race)"],
+    ["shift+P", "instant photo" + (native ? "" : " (downloads a PNG)")],
+  ];
+  const CSS = `
+#ptfx-intro{position:fixed;inset:0;z-index:2147483646;display:none;align-items:center;justify-content:center;padding:16px;
+  background:radial-gradient(ellipse at 50% 40%,rgba(10,14,30,.55),rgba(2,3,8,.88));-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px);
+  font-family:ForcedSquare,Arial,sans-serif;color:#d5dbf2;user-select:none}
+#ptfx-intro.open{display:flex}
+#ptfx-intro *{box-sizing:border-box}
+#ptfx-intro .card{position:relative;width:min(560px,100%);max-height:calc(100vh - 32px);overflow-y:auto;padding:26px 28px 22px;scrollbar-width:thin;scrollbar-color:#2a3260 transparent;
+  background:radial-gradient(rgba(130,150,255,.1) 1px,transparent 1.4px) 0 0/10px 10px,rgba(6,8,15,.96);border:1px solid rgba(130,150,255,.2);
+  box-shadow:0 1px 0 rgba(255,255,255,.05) inset,0 30px 80px rgba(0,0,0,.7),0 0 60px rgba(90,110,255,.12)}
+#ptfx-intro.anim .card{animation:ptfx-in 260ms cubic-bezier(.23,1,.32,1) both}
+#ptfx-intro.anim .card>*{animation:ptfx-up 320ms cubic-bezier(.23,1,.32,1) both;animation-delay:calc(var(--i) * 45ms + 60ms)}
+@keyframes ptfx-in{from{opacity:0;transform:scale(.97)}}
+@keyframes ptfx-up{from{opacity:0;transform:translateY(8px)}}
+#ptfx-intro .card::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(90deg,#7c8cff,#3fd6ff 60%,transparent)}
+#ptfx-intro .tag{display:inline-block;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#3fd6ff;border:1px solid rgba(63,214,255,.4);padding:3px 8px;background:rgba(63,214,255,.07)}
+#ptfx-intro h1{margin:12px 0 4px;font-size:30px;font-weight:400;letter-spacing:.14em;text-transform:uppercase;color:#fff;line-height:1.1}
+#ptfx-intro h1 b{font-weight:400;color:#3fd6ff;text-shadow:0 0 18px rgba(63,214,255,.6)}
+#ptfx-intro p{margin:8px 0 0;font-size:13px;line-height:1.55;color:#aeb8de}
+#ptfx-intro p a{color:#8fdcff;text-decoration:underline;text-underline-offset:2px}
+#ptfx-intro h2{margin:20px 0 6px;font-size:10px;font-weight:400;letter-spacing:.2em;text-transform:uppercase;color:#6f7aa6}
+#ptfx-intro .keys{display:grid;grid-template-columns:auto 1fr;gap:0 16px}
+#ptfx-intro .keys>*{padding:6px 0;border-bottom:1px solid rgba(130,150,255,.09);font-size:13px}
+#ptfx-intro .keys kbd{margin:5px 0;font:inherit;font-size:12px;color:#fff;background:rgba(124,140,255,.14);border:1px solid rgba(130,150,255,.4);border-bottom-width:2px;padding:1px 7px;white-space:nowrap;align-self:start;justify-self:start}
+#ptfx-intro .keys span{color:#aeb8de}
+#ptfx-intro .go{margin-top:20px;display:flex;align-items:center;gap:12px}
+#ptfx-intro button{font:inherit;font-size:14px;letter-spacing:.1em;text-transform:uppercase;color:#04060c;background:linear-gradient(90deg,#8d9bff,#4fdcff);border:0;padding:10px 22px;cursor:pointer;
+  transition:transform 140ms cubic-bezier(.23,1,.32,1),filter 140ms ease}
+#ptfx-intro button:active{transform:scale(.97)}
+@media (hover:hover) and (pointer:fine){#ptfx-intro button:hover{filter:brightness(1.12)}}
+#ptfx-intro .go small{font-size:11px;color:#6f7aa6}
+#ptfx-intro .fine{margin-top:16px;font-size:11px;line-height:1.5;color:#5d688f}
+@media (max-width:520px){#ptfx-intro .card{padding:20px 18px}#ptfx-intro h1{font-size:24px}}
+@media (prefers-reduced-motion:reduce){#ptfx-intro.anim .card,#ptfx-intro.anim .card>*{animation:none}}
+`;
+  let el = null;
+  const seen = () => { try { return !!localStorage.getItem(KEY); } catch { return false; } };
+  const remember = () => { try { localStorage.setItem(KEY, "1"); } catch {} };
+
+  function build() {
+    const st = document.createElement("style"); st.textContent = CSS; document.head.appendChild(st);
+    el = document.createElement("div"); el.id = "ptfx-intro";
+    el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true"); el.setAttribute("aria-label", "FX mod: about and controls");
+    const rows = KEYS.map(([k, d]) => `<kbd>${k}</kbd><span>${d}</span>`).join("");
+    el.innerHTML = `<div class="card">
+      <div style="--i:0"><span class="tag">unofficial graphics update</span></div>
+      <h1 style="--i:1">PolyTrack <b>FX</b></h1>
+      <p style="--i:2">A community-made graphical mod for <b>PolyTrack</b>: day and night, weather and wet roads, headlights, bloom, god rays, ambient occlusion,
+        cinematic cameras and photo mode. The game and everything in it belongs to <b>Kodub.com</b>. This mod is
+        <b>unofficial and not affiliated with, endorsed by, or sponsored by Kodub.com, CrazyGames, Poki or itch.io</b>.
+        Love the game? Play the real one: <a href="https://www.crazygames.com/game/polytrack" target="_blank" rel="noopener">crazygames.com/game/polytrack</a>.</p>
+      <h2 style="--i:3">settings &amp; controls</h2>
+      <div class="keys" style="--i:4">${rows}</div>
+      <p style="--i:4">In photo mode: WASD move · Q/E down/up · drag to look · wheel zoom · Tab orbit the car · Enter capture · Esc exit.</p>
+      <p class="fine" style="--i:5">Everything is tunable live from the panel: time of day, weather, lights, camera, image, performance. If it runs slow, open the panel
+        → performance and pick a lower quality preset or render scale. Settings are saved in this browser. Leaderboards are not available in this build.</p>
+      <div class="go" style="--i:6"><button type="button">let's drive</button><small>Enter or Esc to close · H to reopen</small></div>
+    </div>`;
+    el.querySelector("button").onclick = close;
+    el.addEventListener("pointerdown", (e) => { e.stopPropagation(); if (e.target === el) close(); }, true);
+    for (const ev of ["mousedown", "mouseup", "click", "wheel", "contextmenu"]) el.addEventListener(ev, (e) => e.stopPropagation());
+    document.body.appendChild(el);
+  }
+  function open(first) {
+    if (!el) build();
+    el.classList.toggle("anim", !!first);
+    el.classList.add("open");
+    el.querySelector("button").focus({ preventScroll: true });
+  }
+  function close() { if (!el) return; el.classList.remove("open"); el.querySelector("button").blur(); remember(); }
+  const isOpen = () => !!el && el.classList.contains("open");
+
+  const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName) || e.target?.isContentEditable;
+  window.addEventListener("keydown", (e) => {
+    if (isOpen()) {                                   // modal: the game gets nothing while it is up
+      e.stopImmediatePropagation();
+      if (e.code === "Escape" || e.code === "Enter" || e.code === "KeyH" || e.code === "Space") { e.preventDefault(); if (!e.repeat) close(); }
+      return;
+    }
+    if (e.code === "KeyH" && !e.repeat && !typing(e) && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); e.stopImmediatePropagation(); open(false); }
+  }, true);
+  window.addEventListener("keyup", (e) => { if (isOpen()) e.stopImmediatePropagation(); }, true);
+
+  PT.intro = { open: () => open(false), close };
+  const start = () => { if (!seen()) setTimeout(() => open(true), 400); };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
 })();
