@@ -3308,7 +3308,7 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
   }
   const progOf = (d) => Math.min(d.goal, Math.max(S.n[d.id] || 0, sess[d.id] || 0, S.best?.[d.id] || 0));
   const best = (id, v) => { S.best ??= {}; if (v > (S.best[id] || 0)) { S.best[id] = v; save(); } if (BY[id]?.goal && v >= BY[id].goal) unlock(id); };
-  PT.achievements = { list: () => DEFS.map((d) => ({ ...d, unlocked: S.u[d.id] || 0, progress: d.goal ? progOf(d) : 0 })), unlock, reset: () => { S = { u: {}, n: {}, tracks: [], days: [], trackDays: {}, pbs: {}, corner: {}, wr: {} }; save(); refreshButton(); } };
+  PT.achievements = { preview: (id) => toast(BY[id] || DEFS[0]), list: () => DEFS.map((d) => ({ ...d, unlocked: S.u[d.id] || 0, progress: d.goal ? progOf(d) : 0 })), unlock, reset: () => { S = { u: {}, n: {}, tracks: [], days: [], trackDays: {}, pbs: {}, corner: {}, wr: {} }; save(); refreshButton(); } };
 
   // ---------------------------------------------------------------- helpers
   const $ = (q) => document.querySelector(q);
@@ -3326,17 +3326,33 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
 
   // ---------------------------------------------------------------- toast
   const CSS = `
-#ptfx-ach-toast{position:fixed;left:50%;top:18px;z-index:2147483646;pointer-events:none;transform:translateX(-50%)}
-#ptfx-ach-toast .card{display:flex;gap:12px;align-items:center;width:min(380px,calc(100vw - 32px));padding:12px 14px;color:#eef6ff;
-  font-family:ForcedSquare,Arial,sans-serif;background:rgba(10,16,30,.78);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
-  border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 10px 30px rgba(0,0,0,.35);
-  opacity:0;transform:translateY(-10px) scale(.98);transition:opacity 240ms cubic-bezier(.23,1,.32,1),transform 240ms cubic-bezier(.23,1,.32,1)}
-#ptfx-ach-toast .card.in{opacity:1;transform:none}
-#ptfx-ach-toast .card.out{opacity:0;transform:translateY(-6px);transition-duration:180ms}
+#ptfx-ach-toast{position:fixed;left:50%;top:22px;z-index:2147483646;pointer-events:none;transform:translateX(-50%)}
+#ptfx-ach-toast .card{position:relative;overflow:hidden;display:flex;gap:16px;align-items:center;width:min(480px,calc(100vw - 32px));padding:16px 20px;color:#eef6ff;
+  font-family:ForcedSquare,Arial,sans-serif;background:rgba(10,16,30,.82);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+  border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 12px 36px rgba(0,0,0,.4);
+  opacity:0;transform:translateY(-12px) scale(.96);transition:opacity 260ms cubic-bezier(.23,1,.32,1),transform 260ms cubic-bezier(.23,1,.32,1)}
+#ptfx-ach-toast .card.in{opacity:1;transform:none;animation:ptfx-ach-flash 900ms ease-out 120ms 1}
+#ptfx-ach-toast .card.out{opacity:0;transform:translateY(-8px);transition-duration:200ms}
+/* light running round the border: a conic highlight masked down to a 2px ring, two laps */
+@property --ptfx-ach-a{syntax:"<angle>";inherits:false;initial-value:0deg}
+#ptfx-ach-toast .card::before{content:"";position:absolute;inset:0;padding:3px;pointer-events:none;
+  background:conic-gradient(from var(--ptfx-ach-a),transparent 0 58%,rgba(160,215,255,.55) 76%,#ffffff 88%,rgba(160,215,255,.55) 95%,transparent 100%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;
+  filter:drop-shadow(0 0 6px rgba(170,220,255,1)) drop-shadow(0 0 12px rgba(150,210,255,.7));animation:ptfx-ach-orbit 1400ms linear 200ms 2 both}
+/* one diagonal shine across the card */
+#ptfx-ach-toast .card::after{content:"";position:absolute;top:-40%;bottom:-40%;width:38%;left:0;pointer-events:none;
+  background:linear-gradient(100deg,transparent,rgba(235,247,255,.28),transparent);transform:translateX(-160%) skewX(-18deg);
+  animation:ptfx-ach-shine 1000ms cubic-bezier(.4,0,.2,1) 260ms 1 both}
+@keyframes ptfx-ach-orbit{from{--ptfx-ach-a:0deg;opacity:1}90%{opacity:1}to{--ptfx-ach-a:360deg;opacity:.0}}
+@keyframes ptfx-ach-shine{to{transform:translateX(420%) skewX(-18deg)}}
+@keyframes ptfx-ach-flash{0%{box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 0 0 rgba(150,215,255,0)}
+  25%{box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 0 48px rgba(150,215,255,.75),0 0 0 1px rgba(210,238,255,.6)}
+  100%{box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 12px 36px rgba(0,0,0,.4)}}
 .ptfx-ach-ic{flex:none;width:40px;height:40px;display:grid;place-items:center;font-size:22px;background:rgba(150,205,255,.16);border:1px solid rgba(190,225,255,.22)}
-#ptfx-ach-toast .k{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:#b9e2ff;text-shadow:0 0 6px rgba(150,215,255,.55)}
-#ptfx-ach-toast .t{font-size:15px;margin-top:2px;line-height:1.2}
-#ptfx-ach-toast .d{font-size:11px;opacity:.65;margin-top:2px;line-height:1.3}
+#ptfx-ach-toast .ptfx-ach-ic{width:56px;height:56px;font-size:32px;background:rgba(150,205,255,.2);box-shadow:0 0 16px rgba(150,215,255,.3)}
+#ptfx-ach-toast .k{font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:#b9e2ff;text-shadow:0 0 8px rgba(150,215,255,.6)}
+#ptfx-ach-toast .t{font-size:19px;margin-top:4px;line-height:1.2;text-shadow:0 0 10px rgba(150,215,255,.35)}
+#ptfx-ach-toast .d{font-size:13px;opacity:.68;margin-top:3px;line-height:1.35}
 #ptfx-ach-btn{position:fixed;left:16px;top:16px;z-index:2147483000;display:none;align-items:center;gap:8px;padding:8px 12px;font:12px ForcedSquare,Arial,sans-serif;
   color:#eef6ff;background:rgba(10,16,30,.72);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);cursor:pointer;
   transition:background-color 150ms ease-out,transform 120ms ease-out}
@@ -3384,7 +3400,7 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
     c.querySelector(".ptfx-ach-ic").textContent = d.icon; c.querySelector(".t").textContent = d.title; c.querySelector(".d").textContent = d.desc;
     toastRoot.appendChild(c);
     requestAnimationFrame(() => requestAnimationFrame(() => c.classList.add("in")));
-    setTimeout(() => { c.classList.add("out"); setTimeout(() => { c.remove(); showing = false; pump(); }, 200); }, 4200);
+    setTimeout(() => { c.classList.add("out"); setTimeout(() => { c.remove(); showing = false; pump(); }, 220); }, 5000);
   }
 
   // ---------------------------------------------------------------- achievements screen
@@ -3581,7 +3597,9 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
       document.body.appendChild(btn); refreshButton();
     }
     const inRace = racing(), inEditor = editorOpen();
-    if (btn) btn.style.display = !inRace && !inEditor && !PT.photoMode?.on && $("#ui")?.children.length ? "flex" : "none";
+    // only on the title screen (Garage/Editor/Play row): every sub-menu keeps its Back button in that corner
+    const home = !inRace && !inEditor && !PT.photoMode?.on && [...document.querySelectorAll("#ui button")].some((b) => b.offsetParent !== null && b.innerText.trim() === "Garage");
+    if (btn) btn.style.display = home ? "flex" : "none";
 
     // global / settings-driven
     if (cfg.enabled !== false && now > 5000) unlock("goblin");
