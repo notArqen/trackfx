@@ -1163,8 +1163,12 @@ void main(){
   vec2 wx = ex * 8.0, wy = ey * 8.0;
   vec3 Rw = posAt(vUv + wx, texture2D(tDepth, vUv + wx).r), Lw = posAt(vUv - wx, texture2D(tDepth, vUv - wx).r);
   vec3 Uw = posAt(vUv + wy, texture2D(tDepth, vUv + wy).r), Dw = posAt(vUv - wy, texture2D(tDepth, vUv - wy).r);
-  float okx = step(abs(dot(Rw - P, N)), 0.2 * length(Rw - P)) * step(abs(dot(Lw - P, N)), 0.2 * length(Lw - P));
-  float oky = step(abs(dot(Uw - P, N)), 0.2 * length(Uw - P)) * step(abs(dot(Dw - P, N)), 0.2 * length(Dw - P));
+  // both ends near this plane AND the chord's midpoint on this pixel (a curve passes, an end that jumped onto
+  // another object, e.g. the car's silhouette, does not: that leak lit the background in a car-shaped ghost)
+  float okx = step(abs(dot(Rw - P, N)), 0.12 * length(Rw - P)) * step(abs(dot(Lw - P, N)), 0.12 * length(Lw - P))
+            * step(length(Rw + Lw - 2.0 * P), 0.08 * length(Rw - Lw));
+  float oky = step(abs(dot(Uw - P, N)), 0.12 * length(Uw - P)) * step(abs(dot(Dw - P, N)), 0.12 * length(Dw - P))
+            * step(length(Uw + Dw - 2.0 * P), 0.08 * length(Uw - Dw));
   vec3 Nw = normalize(cross(okx > 0.5 ? Rw - Lw : dx, oky > 0.5 ? Uw - Dw : dy));
   if (dot(Nw, N) > 0.0) N = Nw; else N = -Nw;
   if (dot(N, uCamPos - P) < 0.0) N = -N;
@@ -3172,6 +3176,500 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
   }
   requestAnimationFrame(tick);
 })();
+// ptfx achievements: a tracker that watches the game (race state, impacts, checkpoints, resets, airtime, editor
+// buttons, our own fx features), unlocks achievements, toasts them mid-race and lists them in a screen (main menu
+// button, F8, or the F9 panel). progress lives in localStorage ("ptfx.ach.v1"). replays and photo mode never count.
+(function () {
+  const PT = (window.PTFXNS = window.PTFXNS || {});
+  const cfg = PT.cfg;
+
+  // ---------------------------------------------------------------- definitions
+  // goal: progress target (shown as a bar); prog(): current value toward it. secret: hidden until unlocked
+  const C = { drv: "Driving", tt: "Time Trial", cp: "Checkpoints", bld: "Builder", wld: "Worlds", fx: "Shader Stuff", sec: "Secrets" };
+  const DEFS = [
+    // driving
+    ["first_lap", "drv", "🏁", "Rubber Side Down", "Finish your first lap"],
+    ["resets25", "drv", "🔄", "Have You Tried Turning It Off And On Again", "Press reset 25 times in one session", 25],
+    ["wall_full", "drv", "🛞", "Wall Is Just A Suggestion", "Hit a barrier at full speed and keep going"],
+    ["roof_mode", "drv", "🙃", "Roof Mode", "Drive on your roof for 5 seconds (partial laps count, the roof doesn't care)"],
+    ["air3", "drv", "🚀", "Ramp Enthusiast", "Stay airborne for 3 seconds"],
+    ["skill_issue", "drv", "🧱", "Skill Issue", "Reset 100 times on the same corner", 100],
+    ["kmh300", "drv", "🏎️", "Pedal Meet Metal", "Hit 300 km/h"],
+    ["kmh500", "drv", "🛰️", "Low Earth Orbit", "Hit 500 km/h. on a racetrack. sure"],
+    ["sunday", "drv", "🐢", "Sunday Driver", "Finish a lap without ever going over 100 km/h"],
+    ["clean_lap", "drv", "🧊", "Ice Cold Precision", "Finish a lap without touching a single wall"],
+    ["air60", "drv", "🎢", "Frequent Flyer", "Spend 60 seconds airborne in total", 60],
+    ["landing", "drv", "🪂", "Stuck The Landing", "Fall for 2 seconds, land, and still be doing 100 km/h a second later"],
+    ["pancake", "drv", "🥞", "Pancake", "Land a jump on your roof"],
+    ["barrel", "drv", "🔁", "Do A Barrel Roll", "Roll all the way around in mid-air"],
+    ["brake_check", "drv", "🛑", "Brake Check", "Go from 200 km/h to a full stop in under 4 seconds without hitting anything"],
+    ["walls50", "drv", "🧲", "Wall Magnet", "Hit 50 walls in one session", 50],
+    ["fraud", "drv", "💥", "Insurance Fraud", "Hit something at over 250 km/h"],
+    ["spin", "drv", "🌪️", "Spin Doctor", "Spin a full 360 on the ground in under 3 seconds"],
+    ["demon", "drv", "😈", "Speed Demon", "Spend 30 seconds above 300 km/h in total", 30],
+    ["afk", "drv", "🗿", "Statue Mode", "Sit completely still for 60 seconds mid-race"],
+    ["bunny", "drv", "🐇", "Bunny Hop", "Get airborne 10 times in one run"],
+    // time trial
+    ["close_enough", "tt", "⏱️", "Close Enough", "Beat your best lap by less than 0.01 seconds"],
+    ["scenic", "tt", "🐌", "Scenic Route", "Finish a track slower than 5 times the record"],
+    ["haunted", "tt", "👻", "Haunted By Myself", "Lose to your own ghost"],
+    ["second_best", "tt", "🥈", "Second Best Is First Loser", "Finish within 0.1 seconds of the world record (check the leaderboard first)"],
+    ["top1", "tt", "🏆", "Top Of The Heap", "Be ranked 1st on a track's leaderboard"],
+    ["pb_second", "tt", "⚡", "Seven Tenths Faster", "Improve a lap time by a full second in one attempt"],
+    ["pb_first", "tt", "🥇", "Personal Best Friend", "Set a new personal best"],
+    ["pb10", "tt", "📉", "Diminishing Returns", "Set 10 personal bests on the same track", 10],
+    ["on_fire", "tt", "🔥", "On Fire", "Set 3 personal bests in a row"],
+    ["thousandth", "tt", "🤏", "A Thousandth Of A Clue", "Beat your best by exactly 0.001 seconds"],
+    ["tied", "tt", "🪞", "Tied With Destiny", "Match your personal best to the thousandth"],
+    ["top1000", "tt", "🔢", "Four Digit Club", "Reach the top 1,000 on any leaderboard"],
+    ["top100", "tt", "💯", "Triple Digits", "Reach the top 100 on any leaderboard"],
+    ["laps100", "tt", "📈", "Grinder", "Finish 100 laps", 100],
+    ["restarts50", "tt", "⏳", "One More Try", "Restart the same track 50 times in one session", 50],
+    ["midnight_pb", "tt", "🌙", "Midnight Run", "Set a personal best between 00:00 and 04:00 (in-game time)"],
+    // checkpoints
+    ["final_cp", "cp", "🚩", "Halfway Hero", "Reach the final checkpoint of a track"],
+    ["shame", "cp", "🪦", "Last Checkpoint Of Shame", "Crash within 2 seconds of the finish"],
+    ["wrong_way", "cp", "🧭", "Wrong Way, Right Vibes", "Drive backwards for 30 seconds in one run"],
+    ["cut_corners", "cp", "🎯", "Cut Corners, Cut Throat", "Hit two checkpoints less than 2 seconds apart"],
+    ["respawn10", "cp", "🔔", "Saved By The Bell", "Respawn at a checkpoint 10 times in one run"],
+    ["no_takebacks", "cp", "✋", "No Take Backs", "Finish a lap without a single reset"],
+    ["cp500", "cp", "🧷", "Checkpoint Hoarder", "Pass 500 checkpoints", 500],
+    ["so_close", "cp", "🎰", "So Close", "Reach the final checkpoint, then restart the whole track anyway"],
+    // builder
+    ["saved", "bld", "🏗️", "Napkin Architect", "Save your first track"],
+    ["shared", "bld", "📋", "Share And Share Alike", "Export a track code"],
+    ["unfinishable", "bld", "🧪", "Unfinishable By Design", "Test-drive your track and reset 20 times without finishing it"],
+    ["loop", "bld", "🌀", "Loop De Nope", "Drive upside down on the track for 2 seconds (you did build a loop, right?)"],
+    ["hot_garbage", "bld", "🔥", "Hot Garbage", "Spend 30 minutes in the editor without ever saving", 30],
+    ["pieces", "bld", "📦", "Pieces Of Me", "Click to place 1,000 times in the editor", 1000],
+    ["toolbox", "bld", "🧰", "Open The Toolbox", "Open the track editor"],
+    ["test_pilot", "bld", "🚗", "Test Pilot", "Test-drive a track from the editor"],
+    ["undo100", "bld", "↩️", "Ctrl+Z Enjoyer", "Undo 100 times in the editor", 100],
+    // worlds
+    ["summer", "wld", "☀️", "Sunburn", "Race on a summer track"],
+    ["winter", "wld", "❄️", "Don't Eat The Yellow Snow", "Race on a winter track"],
+    ["desert", "wld", "🏜️", "Sand In Places", "Race on a desert track"],
+    ["tourist", "wld", "🌓", "Tourist", "Race on 25 different tracks", 25],
+    ["globe", "wld", "🌍", "Globetrotter", "Race on summer, winter and desert tracks"],
+    ["cartographer", "wld", "🗺️", "Cartographer", "Race on 100 different tracks", 100],
+    ["offbeat", "wld", "🏘️", "Off The Beaten Path", "Race on a track that isn't an official one"],
+    ["regular", "wld", "📅", "The Usual", "Race the same track on 7 different days", 7],
+    ["loyal", "wld", "🪪", "Loyal Customer", "Play on 7 different days", 7],
+    // fx
+    ["goblin", "fx", "🎨", "Shader Goblin", "Run a mod that makes the game look better than it deserves"],
+    ["rain", "fx", "🌧️", "Wet Behind The Ears", "Race in the rain"],
+    ["thunder", "fx", "⛈️", "Thunderstruck", "Be on track when lightning strikes"],
+    ["hail", "fx", "🧊", "Hail Mary", "Finish a lap in a hailstorm"],
+    ["fog", "fx", "🌫️", "Silent Hill Speedrun", "Finish a lap in fog"],
+    ["night", "fx", "🦉", "Night Owl", "Finish a lap at night"],
+    ["golden", "fx", "🌅", "Golden Hour", "Race with the sun barely above the horizon"],
+    ["beams", "fx", "🔦", "High Beams, Low Standards", "Toggle your headlights 20 times", 20],
+    ["photo1", "fx", "📸", "Say Cheese", "Take a photo"],
+    ["photo50", "fx", "🖼️", "Gallery Opening", "Take 50 photos", 50],
+    ["zeus", "fx", "⚡", "Zeus Mode", "Take a photo while lightning strikes"],
+    ["director", "fx", "🎥", "Director's Cut", "Watch 5 minutes of cinematic cameras", 300],
+    ["spielberg", "fx", "🎬", "Not Now, Spielberg", "Finish a lap with the cinematic camera on"],
+    ["gopro", "fx", "📹", "GoPro Sponsored", "Finish a lap on a car-mounted camera"],
+    ["fishbowl", "fx", "🐟", "Fishbowl", "Max out the gopro fisheye"],
+    ["daytrip", "fx", "🔆", "Day Tripper", "Let the day cycle run a full 24 hours", 24],
+    ["tinker", "fx", "🧪", "Tinkerer", "Change 50 settings in the FX panel", 50],
+    ["factory", "fx", "🧯", "Factory Reset", "Hit 'reset all' in the FX panel"],
+    ["potato", "fx", "🥔", "Potato Mode", "Set graphics quality to low"],
+    ["melt", "fx", "🫠", "Melt The GPU", "Run ultra quality at 100% render scale"],
+    // secrets
+    ["konami", "sec", "🎮", "Up Up Down Down", "You know exactly what you typed", 0, true],
+    ["insomniac", "sec", "🌌", "Insomniac", "Play between 3 and 5 in the morning. real clock. go to bed", 0, true],
+    ["rage", "sec", "💢", "You Were Asking For It", "Rage-reset so hard I consider uninstalling myself", 0, true],
+    ["touch_grass", "sec", "🌱", "Touch Grass", "Leave a race untouched for 10 minutes", 0, true],
+    ["quick_draw", "sec", "🤠", "Quick Draw", "Finish any lap in under 15 seconds", 0, true],
+    ["groundhog", "sec", "🦫", "Groundhog Day", "Restart the same track 200 times", 0, true],
+  ].map(([id, cat, icon, title, desc, goal = 0, secret = false]) => ({ id, cat, icon, title, desc, goal, secret }));
+  const BY = Object.fromEntries(DEFS.map((d) => [d.id, d]));
+
+  // ---------------------------------------------------------------- storage
+  const KEY = "ptfx.ach.v1";
+  let S;
+  try { S = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch { S = {}; }
+  S.u ??= {}; S.n ??= {}; S.tracks ??= []; S.days ??= []; S.trackDays ??= {}; S.pbs ??= {}; S.corner ??= {}; S.wr ??= {};
+  let saveT = 0;
+  const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} }, 400); };
+  const sess = {};   // per-launch counters
+  const has = (id) => !!S.u[id];
+  function unlock(id) {
+    if (has(id) || !BY[id]) return;
+    S.u[id] = Date.now(); save(); toast(BY[id]); refreshButton();
+  }
+  // counters: persistent (S.n) or per-session (sess); unlock when the def's goal is reached
+  function bump(id, by = 1, session = false) {
+    const store = session ? sess : S.n;
+    store[id] = (store[id] || 0) + by;
+    if (!session) save();
+    if (BY[id]?.goal && store[id] >= BY[id].goal) unlock(id);
+  }
+  const progOf = (d) => Math.min(d.goal, Math.max(S.n[d.id] || 0, sess[d.id] || 0, S.best?.[d.id] || 0));
+  const best = (id, v) => { S.best ??= {}; if (v > (S.best[id] || 0)) { S.best[id] = v; save(); } if (BY[id]?.goal && v >= BY[id].goal) unlock(id); };
+  PT.achievements = { list: () => DEFS.map((d) => ({ ...d, unlocked: S.u[d.id] || 0, progress: d.goal ? progOf(d) : 0 })), unlock, reset: () => { S = { u: {}, n: {}, tracks: [], days: [], trackDays: {}, pbs: {}, corner: {}, wr: {} }; save(); refreshButton(); } };
+
+  // ---------------------------------------------------------------- helpers
+  const $ = (q) => document.querySelector(q);
+  const txt = (q) => $(q)?.textContent.trim() ?? "";
+  // "00:24.698" / "1:02:03.123" → seconds; "---" → null
+  function secs(t) {
+    const m = String(t).replace(/[^\d:.]/g, "").match(/^(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/);
+    return m ? (+m[1] || 0) * 3600 + +m[2] * 60 + +m[3] : null;
+  }
+  const racing = () => { const t = $(".game-ui .timer-ui"); return !!(t && t.offsetParent !== null); };
+  const replay = () => performance.now() - (window.__ptfxWatchT ?? -1e9) < 600;
+  const editorOpen = () => { const e = $(".editor-ui"); return !!(e && e.offsetParent !== null); };
+  const today = () => new Date().toDateString();
+  const isNight = (h) => h >= 21 || h < 5;
+
+  // ---------------------------------------------------------------- toast
+  const CSS = `
+#ptfx-ach-toast{position:fixed;left:50%;top:18px;z-index:2147483646;pointer-events:none;transform:translateX(-50%)}
+#ptfx-ach-toast .card{display:flex;gap:12px;align-items:center;width:min(380px,calc(100vw - 32px));padding:12px 14px;color:#eef6ff;
+  font-family:ForcedSquare,Arial,sans-serif;background:rgba(10,16,30,.78);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 10px 30px rgba(0,0,0,.35);
+  opacity:0;transform:translateY(-10px) scale(.98);transition:opacity 240ms cubic-bezier(.23,1,.32,1),transform 240ms cubic-bezier(.23,1,.32,1)}
+#ptfx-ach-toast .card.in{opacity:1;transform:none}
+#ptfx-ach-toast .card.out{opacity:0;transform:translateY(-6px);transition-duration:180ms}
+.ptfx-ach-ic{flex:none;width:40px;height:40px;display:grid;place-items:center;font-size:22px;background:rgba(150,205,255,.16);border:1px solid rgba(190,225,255,.22)}
+#ptfx-ach-toast .k{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:#b9e2ff;text-shadow:0 0 6px rgba(150,215,255,.55)}
+#ptfx-ach-toast .t{font-size:15px;margin-top:2px;line-height:1.2}
+#ptfx-ach-toast .d{font-size:11px;opacity:.65;margin-top:2px;line-height:1.3}
+#ptfx-ach-btn{position:fixed;left:16px;top:16px;z-index:2147483000;display:none;align-items:center;gap:8px;padding:8px 12px;font:12px ForcedSquare,Arial,sans-serif;
+  color:#eef6ff;background:rgba(10,16,30,.72);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);cursor:pointer;
+  transition:background-color 150ms ease-out,transform 120ms ease-out}
+#ptfx-ach-btn:hover{background:rgba(30,44,72,.82)} #ptfx-ach-btn:active{transform:scale(.97)}
+#ptfx-ach{position:fixed;inset:0;z-index:2147483645;display:none;place-items:center;background:rgba(3,6,12,.55);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+  font-family:ForcedSquare,Arial,sans-serif;color:#eef6ff}
+#ptfx-ach.on{display:grid}
+#ptfx-ach .box{width:min(760px,calc(100vw - 32px));max-height:min(80vh,820px);display:flex;flex-direction:column;background:rgba(10,16,30,.9);
+  border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 20px 60px rgba(0,0,0,.5)}
+#ptfx-ach .hd{padding:16px 18px 12px;border-bottom:1px solid rgba(255,255,255,.08)}
+#ptfx-ach .ttl{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+#ptfx-ach .ttl h2{margin:0;font-size:18px;letter-spacing:.08em;text-transform:uppercase;font-weight:normal}
+#ptfx-ach .ttl .cnt{font-size:12px;opacity:.7;font-variant-numeric:tabular-nums}
+#ptfx-ach .ttl .x{background:none;border:0;color:inherit;font:inherit;font-size:16px;opacity:.6;cursor:pointer;padding:0 0 0 8px}
+#ptfx-ach .ttl .x:hover{opacity:1}
+#ptfx-ach .bar{height:3px;background:rgba(255,255,255,.08);margin-top:10px}
+#ptfx-ach .bar i{display:block;height:100%;background:#cfe8ff;box-shadow:0 0 8px rgba(150,215,255,.7)}
+#ptfx-ach .tabs{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+#ptfx-ach .tabs button{padding:4px 9px;font:inherit;font-size:11px;color:#dcecff;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);cursor:pointer;
+  transition:background-color 120ms ease-out}
+#ptfx-ach .tabs button[aria-pressed=true]{background:rgba(205,232,255,.22);border-color:rgba(230,245,255,.5)}
+#ptfx-ach .ls{overflow:auto;padding:6px 10px 14px;scrollbar-width:thin}
+#ptfx-ach h3{margin:14px 8px 6px;font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:rgba(200,225,255,.55);font-weight:normal}
+#ptfx-ach .row{display:flex;gap:12px;align-items:center;padding:8px;border-bottom:1px solid rgba(255,255,255,.04)}
+#ptfx-ach .row .tx{flex:1;min-width:0}
+#ptfx-ach .row .t{font-size:13px} #ptfx-ach .row .d{font-size:11px;opacity:.6;margin-top:2px}
+#ptfx-ach .row .st{flex:none;width:118px;text-align:right;font-size:10px;opacity:.75;font-variant-numeric:tabular-nums}
+#ptfx-ach .row .pb{height:3px;background:rgba(255,255,255,.1);margin-top:5px} #ptfx-ach .row .pb i{display:block;height:100%;background:#9fd0ff}
+#ptfx-ach .row.lock .ptfx-ach-ic{filter:grayscale(1);opacity:.4} #ptfx-ach .row.lock .t{opacity:.75}
+#ptfx-ach .row.got .ptfx-ach-ic{background:rgba(150,205,255,.24);box-shadow:0 0 10px rgba(150,215,255,.25)}
+`;
+  let toastRoot = null, queue = [], showing = false;
+  function ensureDom() {
+    if (toastRoot) return;
+    const st = document.createElement("style"); st.textContent = CSS; document.head.appendChild(st);
+    toastRoot = document.createElement("div"); toastRoot.id = "ptfx-ach-toast"; toastRoot.className = "ptfx-keep"; document.body.appendChild(toastRoot);
+  }
+  function toast(d) { queue.push(d); pump(); }
+  function pump() {
+    if (showing || !queue.length || !document.body) return;
+    if (PT.photoMode?.on) { setTimeout(pump, 1000); return; }   // wait until the photo is composed
+    ensureDom(); showing = true;
+    const d = queue.shift(), c = document.createElement("div"); c.className = "card";
+    c.innerHTML = `<div class="ptfx-ach-ic"></div><div><div class="k">achievement unlocked</div><div class="t"></div><div class="d"></div></div>`;
+    c.querySelector(".ptfx-ach-ic").textContent = d.icon; c.querySelector(".t").textContent = d.title; c.querySelector(".d").textContent = d.desc;
+    toastRoot.appendChild(c);
+    requestAnimationFrame(() => requestAnimationFrame(() => c.classList.add("in")));
+    setTimeout(() => { c.classList.add("out"); setTimeout(() => { c.remove(); showing = false; pump(); }, 200); }, 4200);
+  }
+
+  // ---------------------------------------------------------------- achievements screen
+  let screen = null, tab = "all", btn = null;
+  function buildScreen() {
+    ensureDom();
+    screen = document.createElement("div"); screen.id = "ptfx-ach"; screen.className = "ptfx-keep";
+    screen.innerHTML = `<div class="box" role="dialog" aria-label="Achievements"><div class="hd"><div class="ttl"><h2>Achievements</h2><span><span class="cnt"></span><button class="x" aria-label="Close">✕</button></span></div>
+      <div class="bar"><i></i></div><div class="tabs"></div></div><div class="ls"></div></div>`;
+    screen.addEventListener("pointerdown", (e) => { if (e.target === screen) closeScreen(); });
+    screen.querySelector(".x").onclick = closeScreen;
+    const tabs = screen.querySelector(".tabs");
+    for (const [k, label] of [["all", "All"], ["got", "Unlocked"], ["todo", "Locked"], ...Object.entries(C)]) {
+      const b = document.createElement("button"); b.textContent = label; b.dataset.k = k;
+      b.onclick = () => { tab = k; render(); }; tabs.appendChild(b);
+    }
+    document.body.appendChild(screen);
+  }
+  function render() {
+    const got = DEFS.filter((d) => has(d.id)).length;
+    screen.querySelector(".cnt").textContent = `${got} / ${DEFS.length}`;
+    screen.querySelector(".bar i").style.width = (100 * got / DEFS.length).toFixed(1) + "%";
+    for (const b of screen.querySelectorAll(".tabs button")) b.setAttribute("aria-pressed", String(b.dataset.k === tab));
+    const ls = screen.querySelector(".ls"); ls.textContent = "";
+    for (const [cat, name] of Object.entries(C)) {
+      if (tab in C && tab !== cat) continue;
+      const items = DEFS.filter((d) => d.cat === cat && (tab === "got" ? has(d.id) : tab === "todo" ? !has(d.id) : true));
+      if (!items.length) continue;
+      const h = document.createElement("h3"); h.textContent = name; ls.appendChild(h);
+      for (const d of items) {
+        const u = has(d.id), hide = d.secret && !u;
+        const r = document.createElement("div"); r.className = "row " + (u ? "got" : "lock");
+        const p = d.goal && !u ? progOf(d) / d.goal : 0;
+        r.innerHTML = `<div class="ptfx-ach-ic"></div><div class="tx"><div class="t"></div><div class="d"></div></div><div class="st"></div>`;
+        r.querySelector(".ptfx-ach-ic").textContent = hide ? "❓" : d.icon;
+        r.querySelector(".t").textContent = hide ? "???" : d.title;
+        r.querySelector(".d").textContent = hide ? "Figure this one out for yourself" : d.desc;
+        const st = r.querySelector(".st");
+        if (u) st.textContent = "unlocked · " + new Date(S.u[d.id]).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+        else if (d.goal && p > 0) { st.innerHTML = `<span></span><div class="pb"><i></i></div>`; st.firstChild.textContent = `${Math.floor(progOf(d))} / ${d.goal}`; st.querySelector("i").style.width = (p * 100).toFixed(1) + "%"; }
+        else st.textContent = "locked";
+        ls.appendChild(r);
+      }
+    }
+  }
+  function openScreen() { if (!screen) buildScreen(); render(); screen.classList.add("on"); }
+  function closeScreen() { screen?.classList.remove("on"); }
+  PT.openAchievements = () => (screen?.classList.contains("on") ? closeScreen() : openScreen());
+
+  function refreshButton() {
+    if (!btn) return;
+    btn.querySelector("span").textContent = `${DEFS.filter((d) => has(d.id)).length} / ${DEFS.length}`;
+  }
+
+  // ---------------------------------------------------------------- input-side detections
+  const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName) || e.target?.isContentEditable;
+  const KONAMI = ["ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight", "KeyB", "KeyA"];
+  let kon = 0, resetTimes = [];
+  window.addEventListener("keydown", (e) => {
+    lastInput = performance.now();
+    if (e.code === "F8" && !e.repeat) { e.preventDefault(); PT.openAchievements(); return; }
+    if (e.code === "Escape" && screen?.classList.contains("on")) { e.stopImmediatePropagation(); closeScreen(); return; }
+    if (typing(e) || e.repeat) return;
+    kon = e.code === KONAMI[kon] ? kon + 1 : e.code === KONAMI[0] ? 1 : 0;
+    if (kon === KONAMI.length) { kon = 0; unlock("konami"); }
+    if (editorOpen() && (e.metaKey || e.ctrlKey) && e.code === "KeyZ") bump("undo100");
+    if (!racing() || replay() || PT.photoMode?.on) return;
+    if ((e.code === "KeyE" || e.code === "Slash") && cfg.headlights !== false) bump("beams");
+    const respawn = e.code === "KeyR" || e.code === "Enter", restart = e.code === "KeyT" || e.code === "Backspace";
+    if (!respawn && !restart) return;
+    bump("resets25", 1, true);
+    const now = performance.now();
+    resetTimes = resetTimes.filter((t) => now - t < 6000); resetTimes.push(now);
+    if (resetTimes.length >= 10) unlock("rage");
+    if (run) {
+      run.resets++;
+      const ck = run.track + "#" + run.cp; S.corner[ck] = (S.corner[ck] || 0) + 1; best("skill_issue", S.corner[ck]);
+      if (respawn) { run.respawns++; if (run.respawns >= 10) unlock("respawn10"); }
+      if (restart) {
+        if (run.reachedFinalCp && !run.finished) unlock("so_close");
+        sess.restartsOn ??= {}; sess.restartsOn[run.track] = (sess.restartsOn[run.track] || 0) + 1; best("restarts50", sess.restartsOn[run.track]);
+        S.restarts ??= {}; S.restarts[run.track] = (S.restarts[run.track] || 0) + 1; if (S.restarts[run.track] >= 200) unlock("groundhog");
+      }
+      if (testing && !run.finished) { testResets++; if (testResets >= 20) unlock("unfinishable"); }
+    }
+  }, true);
+
+  // editor buttons (capture phase: the game's own handlers still run)
+  let testing = false, testResets = 0, editorMs = 0, editorSavedThisVisit = false, down = null;
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest?.("button"); if (!b) return;
+    const t = b.innerText.trim();
+    if (editorOpen() || $(".editor-ui")) {
+      if (t === "Test") { testing = true; testResets = 0; unlock("test_pilot"); }
+      if (t === "Export") unlock("shared");
+      if (t === "Save" && b.closest?.("#ui") && document.body.innerText.includes("Track settings")) { unlock("saved"); editorSavedThisVisit = true; }
+    }
+    if (t.startsWith("reset all")) unlock("factory");
+  }, true);
+  window.addEventListener("pointerdown", (e) => { if (editorOpen() && e.target.tagName === "CANVAS" && e.button === 0) down = [e.clientX, e.clientY]; }, true);
+  window.addEventListener("pointerup", (e) => { if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) < 4) bump("pieces"); down = null; }, true);
+
+  // photos + panel tinkering (wrap the existing hooks)
+  const wrapPhoto = () => {
+    const o = PT.onPhoto; if (!o || o.__ach) return !!o;
+    PT.onPhoto = Object.assign((buf, w, h) => {
+      o(buf, w, h); unlock("photo1"); bump("photo50");
+      if ((PT.weather?.flash ?? 0) > 0.3) unlock("zeus");
+    }, { __ach: true });
+    return true;
+  };
+  const wrapSave = () => {
+    const o = PT.save; if (!o || o.__ach) return !!o;
+    PT.save = Object.assign((...a) => { if ($("#ptfx-panel") && $("#ptfx-panel").offsetParent !== null) bump("tinker"); return o(...a); }, { __ach: true });
+    return true;
+  };
+
+  // ---------------------------------------------------------------- per-frame race tracking
+  let run = null, prevFrames = -1, prevFinished = false, lastInput = performance.now(), lastT = performance.now();
+  let air = 0, airV = null, airRoll = 0, prevUp = null, prevFwd = null, spinAcc = 0, spinT = 0, wallHitAt = null;
+  let brakeFrom = null, pbStreak = 0, prevCpIdx = 0, cpAt = 0, todHours = 0, lastTod = null, stillT = 0, idleCheck = 0;
+  // impacts come from the game's own collision impulses (fx/60-speedfx.js hook)
+  const prevImpact = PT.impact;
+  PT.impact = (car, imp) => {
+    prevImpact?.(car, imp);
+    if (car !== window.__ptfxCar || imp <= 25 || !run || replay()) return;
+    const kmh = Math.abs(window.__ptfxCarState?.speedKmh ?? 0);
+    run.hits++; run.lastHitAt = performance.now(); bump("walls50", 1, true);
+    if (kmh > 250 && imp > 2000) unlock("fraud");
+    if (kmh > 230) wallHitAt = { t: performance.now(), kmh };
+    brakeFrom = null;
+  };
+
+  function newRun(track) {
+    const rec = secs(txt(".game-ui .timer-ui .left .time p"));
+    run = { track, rec, resets: 0, respawns: 0, hits: 0, maxKmh: 0, revT: 0, roofT: 0, hops: 0, cp: 0, reachedFinalCp: false, finished: false, lastHitAt: -1e9, startedAt: performance.now() };
+    // track bookkeeping: distinct tracks, days, environments
+    if (track && !S.tracks.includes(track)) { S.tracks.push(track); save(); }
+    best("tourist", S.tracks.length); best("cartographer", S.tracks.length);
+    const env = /^Summer\b/.test(track) ? "summer" : /^Winter\b/.test(track) ? "winter" : /^Desert\b/.test(track) ? "desert" : null;
+    if (env) { unlock(env); S.env ??= {}; S.env[env] = 1; if (S.env.summer && S.env.winter && S.env.desert) unlock("globe"); save(); }
+    else if (track) unlock("offbeat");
+    const d = today();
+    if (track) { const td = (S.trackDays[track] ??= []); if (!td.includes(d)) { td.push(d); save(); } best("regular", td.length); }
+    // a WR scraped from the leaderboard you just looked at belongs to this track
+    if (lastWR && performance.now() - lastWR.at < 120000 && track) { S.wr[track] = lastWR.t; save(); }
+  }
+
+  function finish(t) {
+    run.finished = true;
+    const W = PT.weather || {}, h = cfg.timeOfDay ?? 12;
+    unlock("first_lap"); bump("laps100");
+    if (run.maxKmh <= 100) unlock("sunday");
+    if (run.hits === 0) unlock("clean_lap");
+    if (run.resets === 0) unlock("no_takebacks");
+    if (performance.now() - run.lastHitAt < 2000) unlock("shame");
+    if (t != null && t < 15) unlock("quick_draw");
+    if ((W.hail ?? 0) > 0.5) unlock("hail");
+    if ((W.fog ?? 0) > 0.008) unlock("fog");
+    if (isNight(h)) unlock("night");
+    if (PT.cineActive) unlock("spielberg");
+    if (PT.camBolted) unlock("gopro");
+    if (t != null && run.rec != null) {
+      const d = run.rec - t;   // positive = faster than the old best
+      if (Math.abs(d) < 0.0005) unlock("tied");
+      if (d > 0.0005) {
+        unlock("pb_first");
+        if (d < 0.01) unlock("close_enough");
+        if (Math.abs(d - 0.001) < 0.0005) unlock("thousandth");
+        if (d >= 1) unlock("pb_second");
+        if (h < 4) unlock("midnight_pb");
+        S.pbs[run.track] = (S.pbs[run.track] || 0) + 1; best("pb10", S.pbs[run.track]);
+        pbStreak++; if (pbStreak >= 3) unlock("on_fire");
+      } else { pbStreak = 0; if (d < -0.0005) unlock("haunted"); }
+    } else if (t != null && run.rec == null) { unlock("pb_first"); pbStreak++; }
+    const ref = S.wr[run.track] ?? run.rec;
+    if (t != null && ref && t > ref * 5) unlock("scenic");
+    const wr = S.wr[run.track];
+    if (t != null && wr && t - wr > 0 && t - wr <= 0.1) unlock("second_best");
+    if (testing) testing = false;
+  }
+
+  let lastWR = null;
+  function tick(now) {
+    requestAnimationFrame(tick);
+    const dt = Math.min(0.1, (now - lastT) / 1000); lastT = now;
+    if (!wrapPhoto.done) wrapPhoto.done = wrapPhoto();
+    if (!wrapSave.done) wrapSave.done = wrapSave();
+    // main-menu button: only on menus
+    if (document.body && !btn) {
+      ensureDom();
+      btn = document.createElement("button"); btn.id = "ptfx-ach-btn"; btn.className = "ptfx-keep";
+      btn.innerHTML = `🏆 achievements <span></span>`; btn.onclick = () => { PT.openAchievements(); btn.blur(); };
+      document.body.appendChild(btn); refreshButton();
+    }
+    const inRace = racing(), inEditor = editorOpen();
+    if (btn) btn.style.display = !inRace && !inEditor && !PT.photoMode?.on && $("#ui")?.children.length ? "flex" : "none";
+
+    // global / settings-driven
+    if (cfg.enabled !== false && now > 5000) unlock("goblin");
+    if (cfg.quality === "low") unlock("potato");
+    if (cfg.quality === "ultra" && (cfg.renderScale ?? 0) >= 1) unlock("melt");
+    if ((cfg.goproFisheye ?? 0) >= 0.99) unlock("fishbowl");
+    const hr = new Date().getHours(); if (hr >= 3 && hr < 5) unlock("insomniac");
+    const d = today(); if (!S.days.includes(d)) { S.days.push(d); save(); } best("loyal", S.days.length);
+    if (cfg.dayCycle && lastTod != null) { const dh = ((cfg.timeOfDay ?? 0) - lastTod + 24) % 24; if (dh < 1) { todHours += dh; best("daytrip", todHours); } }
+    lastTod = cfg.timeOfDay ?? 0;
+    if (PT.cineActive && !PT.photoMode?.on) bump("director", dt);
+    if (inEditor) { unlock("toolbox"); if (!editorSavedThisVisit) { editorMs += dt * 1000; best("hot_garbage", editorMs / 60000); } }
+    else if (!inRace) editorSavedThisVisit = false;
+
+    // leaderboard you're looking at: world record + whether you're on it
+    const lb = $(".leaderboard-ui");
+    if (lb && lb.offsetParent !== null) { const t = secs(lb.querySelector("p")?.textContent || ""); if (t) lastWR = { t, at: now }; }
+
+    if (!inRace || replay() || PT.photoMode?.on) { prevFinished = false; return; }
+    const car = window.__ptfxCar, st = window.__ptfxCarState, pc = PT.playerCar;
+    if (!car || !st) return;
+    const track = txt(".game-toolbar-ui .track-name");
+    // a new run: first frame, a different track, or a real restart (the frame count drops back to ~0). a checkpoint
+    // respawn (R) also rewinds the count, but only to the checkpoint's time, and keeps the same run
+    if (!run || track !== run.track || (st.frames < prevFrames && st.frames < 30)) { newRun(track); prevCpIdx = 0; }
+    prevFrames = st.frames;
+    const pos = txt(".game-toolbar-ui .position").replace(/\D/g, "");
+    if (pos) { const p = +pos; if (p >= 1 && p <= 1000) unlock("top1000"); if (p >= 1 && p <= 100) unlock("top100"); if (p === 1) unlock("top1"); }
+
+    const W = PT.weather || {};
+    if ((W.rain ?? 0) > 0.3 && (W.hail ?? 0) < 0.5) unlock("rain");
+    if ((W.flash ?? 0) > 0.8) unlock("thunder");
+    if (PT.lightDir && PT.lightDir.y > 0 && PT.lightDir.y < 0.17 && st.hasStarted) unlock("golden");
+
+    // idle in a race: nothing pressed for 10 minutes
+    if (now - lastInput > 600000) unlock("touch_grass");
+
+    const finished = !!car.hasFinished?.();
+    if (finished && !prevFinished && !run.finished) finish(secs(txt(".game-ui .timer-ui .center .time p")));
+    prevFinished = finished;
+    if (finished || !st.hasStarted) return;
+
+    const kmh = st.speedKmh ?? 0, ak = Math.abs(kmh);
+    run.maxKmh = Math.max(run.maxKmh, ak);
+    if (ak >= 300) { unlock("kmh300"); bump("demon", dt); }
+    if (ak >= 500) unlock("kmh500");
+    if (kmh < -10) { run.revT += dt; if (run.revT >= 30) unlock("wrong_way"); }
+    // full-speed wall hit and still flying a second later
+    if (wallHitAt && now - wallHitAt.t > 1000) { if (ak > 150) unlock("wall_full"); wallHitAt = null; }
+    // brake check: 200 → 0 in under 4 s, no hits in between
+    if (ak >= 200) brakeFrom = now; else if (brakeFrom && ak < 1) { if (now - brakeFrom < 4000) unlock("brake_check"); brakeFrom = null; }
+    // sitting still mid-race
+    stillT = ak < 0.5 ? stillT + dt : 0; if (stillT >= 60) unlock("afk");
+
+    // checkpoints ("2/6" in the hud; nextCheckpointIndex counts up)
+    const [cpA, cpB] = txt(".game-ui .checkpoint-ui span").split("/").map((x) => parseInt(x, 10) || 0);
+    const ci = st.nextCheckpointIndex ?? 0;
+    if (ci > prevCpIdx) {
+      bump("cp500", ci - prevCpIdx);
+      if (now - cpAt < 2000) unlock("cut_corners");
+      cpAt = now; run.cp = ci;
+    }
+    prevCpIdx = ci;
+    if (cpB > 0 && cpA >= cpB) { run.reachedFinalCp = true; unlock("final_cp"); }
+
+    // airtime, landings, rolls, roof driving, ground spins (wheel contacts come from the game)
+    const grounded = (st.wheelContact || []).some((w) => w != null);
+    const up = pc?.up, fwd = pc?.fwd;
+    if (!grounded) {
+      air += dt; bump("air60", dt);
+      if (air >= 3) unlock("air3");
+      if (up && prevUp && fwd) { const ax = prevUp.clone().cross(up); airRoll += Math.asin(Math.max(-1, Math.min(1, ax.dot(fwd)))); if (Math.abs(airRoll) > 5.9) unlock("barrel"); }
+      if (air > 0.25) airV = ak;
+    } else {
+      if (air > 0.3) {
+        run.hops++; if (run.hops >= 10) unlock("bunny");
+        if (up && up.y < -0.3) unlock("pancake");
+        if (air >= 2) { const at = now; setTimeout(() => { if (Math.abs(window.__ptfxCarState?.speedKmh ?? 0) > 100 && run && !run.finished && performance.now() - at < 1600) unlock("landing"); }, 1000); }
+      }
+      air = 0; airRoll = 0;
+      if (up && up.y < -0.5 && ak > 15) { run.roofT += dt; if (run.roofT >= 2) unlock("loop"); if (run.roofT >= 5) unlock("roof_mode"); }
+      if (fwd && prevFwd) { const yaw = Math.atan2(prevFwd.clone().cross(fwd).dot(up || { x: 0, y: 1, z: 0, dot() { return 0; } }), prevFwd.dot(fwd)); spinAcc += yaw; spinT += dt;
+        if (spinT > 3) { spinAcc *= 0.5; spinT = 1.5; } if (Math.abs(spinAcc) > 6.1) { unlock("spin"); spinAcc = 0; } }
+    }
+    prevUp = up?.clone() ?? null; prevFwd = fwd?.clone() ?? null;
+  }
+  requestAnimationFrame(tick);
+})();
 // ptfx settings panel. F9 toggles it. keyboard-opened and used constantly, so it appears instantly:
 // no open/close animation. styled after polytrack's own ui (navy panels, ForcedSquare, square corners).
 (function () {
@@ -3351,7 +3849,8 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
 #ptfx-panel .tog[aria-checked=true] i{transform:translateX(18px);background:#fff}
 #ptfx-panel .tog:active{transform:scale(.96)}
 #ptfx-panel .master{margin:0}
-#ptfx-panel footer{display:flex;gap:8px;padding:12px 14px 0}
+#ptfx-panel footer{display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px 0}
+#ptfx-panel footer .btn:first-child{flex-basis:100%}
 #ptfx-panel button.btn{flex:1;font:inherit;font-size:12px;letter-spacing:.06em;color:var(--txt);background:rgba(124,140,255,.07);border:1px solid rgba(130,150,255,.28);
   padding:7px 0;cursor:pointer;transition:transform 140ms cubic-bezier(.23,1,.32,1),background-color 140ms ease}
 #ptfx-panel button.btn:active{transform:scale(.97)}
@@ -3448,7 +3947,9 @@ body.ptfx-holo #ui > :not(.game-ui) { filter: brightness(.8) saturate(.85) contr
       try { await navigator.clipboard.writeText(txt); } catch { const t = document.createElement("textarea"); t.value = txt; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
       copy.textContent = "copied"; setTimeout(() => (copy.textContent = "copy settings"), 1200);
     };
-    foot.appendChild(copy); foot.appendChild(reset); panel.appendChild(foot);
+    const ach = document.createElement("button"); ach.className = "btn"; ach.textContent = "🏆 achievements · F8";
+    ach.onclick = () => PT.openAchievements?.();
+    foot.appendChild(ach); foot.appendChild(copy); foot.appendChild(reset); panel.appendChild(foot);
 
     // keep the game from reacting to clicks and drags on the panel
     for (const ev of ["mousedown", "mouseup", "click", "pointerdown", "pointerup", "wheel", "contextmenu"])
